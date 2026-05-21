@@ -36,6 +36,7 @@ pub struct ReplayMetaOut {
     pub players_per_team: u32,
     pub arena_id: Option<String>,
     pub arena_id_hex: Option<String>,
+    pub client_build: Option<u32>,
     pub space_id: Option<u32>,
     /// Server/region extracted from the receivePlayerData pickle blob. None
     /// when no recognisable realm string was found.
@@ -111,6 +112,7 @@ pub fn build_analysis(
     server_ticks: Vec<f32>,
     headers: Vec<PacketHeader>,
     map_info: Option<crate::replay::MapInfo>,
+    arena_id: Option<i64>,
     region: Option<&'static str>,
     thresholds: SpikeThresholds,
 ) -> AnalysisResult {
@@ -135,6 +137,8 @@ pub fn build_analysis(
     let battle_start_clock_approx_s = 30.94_f32;
     let severity = classify_severity(&spikes, battle_start_clock_approx_s);
 
+    let client_build = crate::replay::build_from_client_version(&meta.clientVersionFromExe);
+
     AnalysisResult {
         meta: ReplayMetaOut {
             map: meta.mapName,
@@ -148,8 +152,9 @@ pub fn build_analysis(
             battle_duration_s: meta.battleDuration,
             replay_duration_s: meta.duration,
             players_per_team: meta.playersPerTeam,
-            arena_id: map_info.map(|m| m.arena_id.to_string()),
-            arena_id_hex: map_info.map(|m| format!("{:016x}", m.arena_id as u64)),
+            arena_id: arena_id.map(|a| a.to_string()),
+            arena_id_hex: arena_id.map(|a| format!("{:016x}", a as u64)),
+            client_build,
             space_id: map_info.map(|m| m.space_id),
             region: region.map(|r| r.to_string()),
         },

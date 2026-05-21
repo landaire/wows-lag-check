@@ -27,6 +27,8 @@ fn main() {
     .expect("walk packets");
 
     let region = replay::detect_realm(&decrypted.packet_data);
+    let arena_id = replay::build_from_client_version(&decrypted.meta.clientVersionFromExe)
+        .and_then(|build| replay::detect_arena_id(&decrypted.packet_data, build));
 
     let result = analysis::build_analysis(
         decrypted.meta,
@@ -34,6 +36,7 @@ fn main() {
         server_ticks,
         headers,
         map_info,
+        arena_id,
         region,
         analysis::SpikeThresholds::default(),
     );

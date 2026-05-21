@@ -135,6 +135,62 @@ pub struct NetStat {
     pub is_lagging: bool,
 }
 
+/// Method_id of `onArenaStateReceived` on the Avatar entity, per WoWs build.
+/// Derived from the game's entity definitions via
+/// `replayshark spec <version> -g <game_dir>` (or any equivalent that walks
+/// Avatar.def and its `<Implements>` interfaces, concatenates client methods,
+/// and sorts by sort_size()). Add new entries here whenever WoWs ships a
+/// patch that changes Avatar's method layout.
+///
+/// Source for build 12506899 (15.4.0): " - 148: onArenaStateReceived" with
+/// first arg `Primitive(Int64)`.
+const ARENA_STATE_METHOD_ID: &[(u32, u32)] = &[
+    (12506899, 148),
+];
+
+/// Pulls the canonical arenaUniqueId out of the `onArenaStateReceived`
+/// EntityMethod packet (type 0x08, clock=0). The method index for the
+/// Avatar entity comes from the bundled lookup table above. Returns None
+/// when the replay's build isn't in the table — no heuristic fallback.
+///
+/// EntityMethod body layout (BigWorld, build-independent):
+///   [0..4]   entity_id      (Avatar)
+///   [4..8]   method_id      (looked up by game build)
+///   [8..12]  payload_length
+///   [12..20] arena_id       (Int64, first arg of onArenaStateReceived)
+pub fn detect_arena_id(packet_data: &[u8], build: u32) -> Option<i64> {
+    let method_id = ARENA_STATE_METHOD_ID
+        .iter()
+        .find_map(|(b, m)| if *b == build { Some(*m) } else { None })?;
+
+    let mut offset = 0usize;
+    while offset + 12 <= packet_data.len() {
+        let size = u32::from_le_bytes(packet_data[offset..offset + 4].try_into().unwrap()) as usize;
+        let ptype = u32::from_le_bytes(packet_data[offset + 4..offset + 8].try_into().unwrap());
+        let clock = f32::from_le_bytes(packet_data[offset + 8..offset + 12].try_into().unwrap());
+        let body_start = offset + 12;
+        let body_end = body_start + size;
+        if body_end > packet_data.len() {
+            break;
+        }
+        if ptype == 0x08 && clock == 0.0 && size >= 20 {
+            let m = u32::from_le_bytes(packet_data[body_start + 4..body_start + 8].try_into().unwrap());
+            if m == method_id {
+                let arena_off = body_start + 12;
+                let bytes = &packet_data[arena_off..arena_off + 8];
+                return Some(i64::from_le_bytes(bytes.try_into().unwrap()));
+            }
+        }
+        offset = body_end;
+    }
+    None
+}
+
+/// Parse the build number out of `clientVersionFromExe` (e.g. "15,4,0,12506899").
+pub fn build_from_client_version(s: &str) -> Option<u32> {
+    s.split(',').nth(3)?.trim().parse().ok()
+}
+
 /// Scans the decrypted packet bytes for pickle SHORT_BINSTRING tokens matching
 /// known WoWs realm codes. The receivePlayerData blob stores each player's
 /// realm as `U\x{len}{ascii}`, with the key name memoized once so it doesn't
