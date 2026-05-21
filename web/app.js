@@ -18,6 +18,8 @@ const severityHeadline = document.getElementById("severityHeadline");
 const copyBtn = document.getElementById("copyBtn");
 const copyBtnLabel = document.getElementById("copyBtnLabel");
 const copyPopover = document.getElementById("copyPopover");
+const copyChartBtn = document.getElementById("copyChartBtn");
+const copyChartBtnLabel = document.getElementById("copyChartBtnLabel");
 
 let wasmReady = init();
 let lastResult = null;
@@ -77,6 +79,71 @@ copyBtn.addEventListener("click", async () => {
 function flashCopyButton(text) {
   copyBtnLabel.textContent = text;
   setTimeout(() => (copyBtnLabel.textContent = "Copy for Discord"), 1500);
+}
+
+function flashChartButton(text) {
+  copyChartBtnLabel.textContent = text;
+  setTimeout(() => (copyChartBtnLabel.textContent = "Copy chart"), 1500);
+}
+
+copyChartBtn.addEventListener("click", async () => {
+  const svg = chartWrap.querySelector("svg");
+  if (!svg) return;
+  try {
+    const blob = await renderChartToPngBlob(svg);
+    if (navigator.clipboard && window.ClipboardItem) {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      flashChartButton("Copied!");
+    } else {
+      throw new Error("clipboard image write not supported");
+    }
+  } catch (err) {
+    console.warn("Falling back to download:", err);
+    try {
+      const blob = await renderChartToPngBlob(svg);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "wows-lag-check-chart.png";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      flashChartButton("Downloaded");
+    } catch (err2) {
+      console.error(err2);
+      flashChartButton("Failed");
+    }
+  }
+});
+
+async function renderChartToPngBlob(svg) {
+  const vb = svg.viewBox.baseVal;
+  const scale = 2;
+  const w = vb.width  * scale;
+  const h = vb.height * scale;
+
+  const svgStr = new XMLSerializer().serializeToString(svg);
+  const svgBlob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(svgBlob);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    return await new Promise((resolve, reject) =>
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))), "image/png")
+    );
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function showPopover() {
