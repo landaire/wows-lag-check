@@ -12,13 +12,11 @@ crate-type = ["cdylib", "rlib"]
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
-serde_json = "1"
-blowfish = "0.9"
-byteorder = "1"
-cipher = "0.4"
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-thiserror = "2"
 console_error_panic_hook = { version = "0.1", optional = true }
+
+# Sans-io replay parser. default features = ["arc", "parsing"] - no filesystem
+# VFS, so this compiles for wasm32.
+wows_replays = "0.34"
 
 [features]
 default = ["console_error_panic_hook"]

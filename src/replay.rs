@@ -1,197 +1,53 @@
-//! Minimal WoWs replay parser. Format reference: wows-replays crate
-//! (https://github.com/landaire/wows-toolkit).
-//!
-//! Packet wire format is `[size:u32, type:u32, clock:f32, body:size]`. We
-//! decode PlayerNetStats (0x1d), ServerTick (0x0e), and Map (0x28) bodies;
-//! everything else gets skipped by `size` without needing entity defs.
-
-use blowfish::Blowfish;
-use byteorder::BE;
-use cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
-use flate2::read::ZlibDecoder;
-use serde::Deserialize;
-use std::io::Read;
-use thiserror::Error;
-
-const REPLAY_BLOWFISH_KEY: [u8; 16] = [
-    0x29, 0xB7, 0xC9, 0x09, 0x38, 0x3F, 0x84, 0x88, 0xFA, 0x98, 0xEC, 0x4E, 0x13, 0x19, 0x79, 0xFB,
-];
-
-#[derive(Debug, Error)]
-pub enum ReplayError {
-    #[error("file too short")]
-    TooShort,
-    #[error("metadata JSON parse error: {0}")]
-    MetaJson(#[from] serde_json::Error),
-    #[error("metadata is not valid UTF-8")]
-    MetaUtf8,
-    #[error("replay payload is not a multiple of 8 bytes (blowfish block size)")]
-    BadBlockAlignment,
-    #[error("zlib decompression failed: {0}")]
-    Inflate(#[from] std::io::Error),
-    #[error("packet stream truncated at offset {0}")]
-    Truncated(usize),
-}
-
-#[allow(non_snake_case)]
-#[derive(Clone, Debug, Deserialize)]
-pub struct VehicleInfo {
-    pub shipId: i64,
-    pub relation: u32,
-    pub id: i64,
-    pub name: String,
-}
-
-#[allow(non_snake_case)]
-#[derive(Clone, Debug, Deserialize)]
-pub struct ReplayMeta {
-    pub clientVersionFromExe: String,
-    pub mapDisplayName: String,
-    pub mapName: String,
-    pub dateTime: String,
-    pub playerName: String,
-    pub playerVehicle: String,
-    pub matchGroup: String,
-    pub gameType: String,
-    pub battleDuration: u32,
-    pub duration: u32,
-    pub playersPerTeam: u32,
-    #[serde(default)]
-    pub vehicles: Vec<VehicleInfo>,
-}
-
-pub struct DecryptedReplay {
-    pub meta: ReplayMeta,
-    pub packet_data: Vec<u8>,
-}
-
-pub fn parse_replay_bytes(bytes: &[u8]) -> Result<DecryptedReplay, ReplayError> {
-    let mut cur = 0usize;
-
-    let read_u32 = |b: &[u8], at: usize| -> Result<u32, ReplayError> {
-        b.get(at..at + 4)
-            .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
-            .ok_or(ReplayError::TooShort)
-    };
-
-    let _magic = read_u32(bytes, cur)?;
-    cur += 4;
-    let block_count = read_u32(bytes, cur)? as usize;
-    cur += 4;
-
-    let meta_len = read_u32(bytes, cur)? as usize;
-    cur += 4;
-    let meta_raw = bytes.get(cur..cur + meta_len).ok_or(ReplayError::TooShort)?;
-    cur += meta_len;
-    let meta_str = std::str::from_utf8(meta_raw).map_err(|_| ReplayError::MetaUtf8)?;
-    let meta: ReplayMeta = serde_json::from_str(meta_str)?;
-
-    for _ in 0..(block_count.saturating_sub(1)) {
-        let block_size = read_u32(bytes, cur)? as usize;
-        cur += 4 + block_size;
-        if cur > bytes.len() {
-            return Err(ReplayError::TooShort);
-        }
-    }
-
-    let _decompressed_size = read_u32(bytes, cur)?;
-    cur += 4;
-    let _compressed_size = read_u32(bytes, cur)?;
-    cur += 4;
-
-    let encrypted = bytes.get(cur..).ok_or(ReplayError::TooShort)?;
-    if encrypted.len() % 8 != 0 {
-        return Err(ReplayError::BadBlockAlignment);
-    }
-
-    let cipher = <Blowfish<BE>>::new_from_slice(&REPLAY_BLOWFISH_KEY)
-        .expect("16-byte key is valid for Blowfish");
-
-    let mut decrypted = vec![0u8; encrypted.len()];
-    let mut previous = [0u8; 8];
-    for chunk_idx in 0..(encrypted.len() / 8) {
-        let off = chunk_idx * 8;
-        let mut block = GenericArray::clone_from_slice(&encrypted[off..off + 8]);
-        cipher.decrypt_block(&mut block);
-        for (j, b) in block.iter().enumerate() {
-            decrypted[off + j] = *b ^ previous[j];
-        }
-        previous.copy_from_slice(&decrypted[off..off + 8]);
-    }
-
-    let mut deflater = ZlibDecoder::new(decrypted.as_slice());
-    let mut packet_data = Vec::new();
-    deflater.read_to_end(&mut packet_data)?;
-
-    Ok(DecryptedReplay { meta, packet_data })
-}
-
-/// One observation from a `PlayerNetStats` (0x1d) packet.
-#[derive(Debug, Clone, Copy)]
-pub struct NetStat {
-    pub clock: f32,
-    pub fps: u8,
-    pub ping: u16,
-    pub is_lagging: bool,
-}
-
-/// Method_id of `onArenaStateReceived` on the Avatar entity, per WoWs build.
-/// Derived from the game's entity definitions via
-/// `replayshark spec <version> -g <game_dir>` (or any equivalent that walks
-/// Avatar.def and its `<Implements>` interfaces, concatenates client methods,
-/// and sorts by sort_size()). Add new entries here whenever WoWs ships a
-/// patch that changes Avatar's method layout.
-///
-/// Source for build 12506899 (15.4.0): " - 148: onArenaStateReceived" with
-/// first arg `Primitive(Int64)`.
-const ARENA_STATE_METHOD_ID: &[(u32, u32)] = &[
-    (12506899, 148),
-];
-
-/// Pulls the canonical arenaUniqueId out of the `onArenaStateReceived`
-/// EntityMethod packet (type 0x08, clock=0). The method index for the
-/// Avatar entity comes from the bundled lookup table above. Returns None
-/// when the replay's build isn't in the table — no heuristic fallback.
-///
-/// EntityMethod body layout (BigWorld, build-independent):
-///   [0..4]   entity_id      (Avatar)
-///   [4..8]   method_id      (looked up by game build)
-///   [8..12]  payload_length
-///   [12..20] arena_id       (Int64, first arg of onArenaStateReceived)
-pub fn detect_arena_id(packet_data: &[u8], build: u32) -> Option<i64> {
-    let method_id = ARENA_STATE_METHOD_ID
-        .iter()
-        .find_map(|(b, m)| if *b == build { Some(*m) } else { None })?;
-
-    let mut offset = 0usize;
-    while offset + 12 <= packet_data.len() {
-        let size = u32::from_le_bytes(packet_data[offset..offset + 4].try_into().unwrap()) as usize;
-        let ptype = u32::from_le_bytes(packet_data[offset + 4..offset + 8].try_into().unwrap());
-        let clock = f32::from_le_bytes(packet_data[offset + 8..offset + 12].try_into().unwrap());
-        let body_start = offset + 12;
-        let body_end = body_start + size;
-        if body_end > packet_data.len() {
-            break;
-        }
-        if ptype == 0x08 && clock == 0.0 && size >= 20 {
-            let m = u32::from_le_bytes(packet_data[body_start + 4..body_start + 8].try_into().unwrap());
-            if m == method_id {
-                let arena_off = body_start + 12;
-                let bytes = &packet_data[arena_off..arena_off + 8];
-                return Some(i64::from_le_bytes(bytes.try_into().unwrap()));
-            }
-        }
-        offset = body_end;
-    }
-    None
-}
+//! Replay helpers that sit on top of the wows-replays parser: realm detection,
+//! the arena-state method-id table, and arena_id extraction. Decryption,
+//! decompression, and packet walking all come from wows-replays itself.
 
 /// Parse the build number out of `clientVersionFromExe` (e.g. "15,4,0,12506899").
 pub fn build_from_client_version(s: &str) -> Option<u32> {
     s.split(',').nth(3)?.trim().parse().ok()
 }
 
-/// Scans the decrypted packet bytes for pickle SHORT_BINSTRING tokens matching
+/// Method_id of `onArenaStateReceived` on the Avatar entity, per WoWs build.
+/// Derived from the game's entity definitions via
+/// `replayshark spec <version> -g <game_dir>` (walk Avatar.def and its
+/// `<Implements>` interfaces, concatenate client methods, sort by sort_size()).
+/// Add a new entry whenever WoWs ships a patch that changes Avatar's method
+/// layout.
+///
+/// Build 12506899 (15.4.0): " - 148: onArenaStateReceived", first arg Int64.
+const ARENA_STATE_METHOD_ID: &[(u32, u32)] = &[
+    (12506899, 148),
+];
+
+/// Look up the `onArenaStateReceived` method_id for a given game build.
+/// Returns None for builds not in the table.
+pub fn arena_state_method_id(build: u32) -> Option<u32> {
+    ARENA_STATE_METHOD_ID
+        .iter()
+        .find_map(|(b, m)| if *b == build { Some(*m) } else { None })
+}
+
+/// Extract the canonical arenaUniqueId from an EntityMethod packet body, given
+/// the expected `onArenaStateReceived` method_id. Returns None when the body's
+/// method_id doesn't match.
+///
+/// EntityMethod body layout (BigWorld):
+///   [0..4]   entity_id
+///   [4..8]   method_id
+///   [8..12]  payload_length
+///   [12..20] arena_id (Int64, first arg of onArenaStateReceived)
+pub fn arena_id_from_packet_body(raw: &[u8], method_id: u32) -> Option<i64> {
+    if raw.len() < 20 {
+        return None;
+    }
+    let m = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    if m != method_id {
+        return None;
+    }
+    Some(i64::from_le_bytes(raw[12..20].try_into().unwrap()))
+}
+
+/// Scan the decrypted packet bytes for pickle SHORT_BINSTRING tokens matching
 /// known WoWs realm codes. The receivePlayerData blob stores each player's
 /// realm as `U\x{len}{ascii}`, with the key name memoized once so it doesn't
 /// recur. The most-common matching realm is the match's server.
@@ -221,66 +77,4 @@ pub fn detect_realm(packet_data: &[u8]) -> Option<&'static str> {
 
 fn memmem(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-pub fn walk_packets<HV, NV, TV, MV>(
-    packet_data: &[u8],
-    mut visit_header: HV,
-    mut visit_netstat: NV,
-    mut visit_servertick: TV,
-    mut visit_map: MV,
-) -> Result<(), ReplayError>
-where
-    HV: FnMut(f32, u32),
-    NV: FnMut(NetStat),
-    TV: FnMut(f32),
-    MV: FnMut(MapInfo),
-{
-    let mut offset = 0usize;
-    while offset < packet_data.len() {
-        if offset + 12 > packet_data.len() {
-            return Err(ReplayError::Truncated(offset));
-        }
-        let size = u32::from_le_bytes(packet_data[offset..offset + 4].try_into().unwrap()) as usize;
-        let ptype = u32::from_le_bytes(packet_data[offset + 4..offset + 8].try_into().unwrap());
-        let clock = f32::from_le_bytes(packet_data[offset + 8..offset + 12].try_into().unwrap());
-        let body_start = offset + 12;
-        let body_end = body_start + size;
-        if body_end > packet_data.len() {
-            return Err(ReplayError::Truncated(offset));
-        }
-        let body = &packet_data[body_start..body_end];
-
-        visit_header(clock, ptype);
-
-        match ptype {
-            0x1d if body.len() >= 4 => {
-                let packed = u32::from_le_bytes(body[..4].try_into().unwrap());
-                let fps = (packed & 0xff) as u8;
-                let ping = ((packed >> 8) & 0xffff) as u16;
-                let is_lagging = ((packed >> 24) & 1) != 0;
-                visit_netstat(NetStat { clock, fps, ping, is_lagging });
-            }
-            0x0e if body.len() >= 8 => {
-                let _tick_rate = f64::from_le_bytes(body[..8].try_into().unwrap());
-                visit_servertick(clock);
-            }
-            0x28 if body.len() >= 12 => {
-                let space_id = u32::from_le_bytes(body[0..4].try_into().unwrap());
-                let arena_id = i64::from_le_bytes(body[4..12].try_into().unwrap());
-                visit_map(MapInfo { space_id, arena_id });
-            }
-            _ => {}
-        }
-
-        offset = body_end;
-    }
-    Ok(())
-}
-
-/// `arena_id` is the server-side match identifier.
-#[derive(Debug, Clone, Copy)]
-pub struct MapInfo {
-    pub space_id: u32,
-    pub arena_id: i64,
 }

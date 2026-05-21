@@ -1,45 +1,12 @@
 // cargo run --release --bin smoke -- <replay.wowsreplay>
 
 use std::fs;
-use wows_lag_check::{analysis, replay};
+use wows_lag_check::run_analysis;
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: smoke <replay>");
     let bytes = fs::read(&path).expect("read replay");
-
-    let decrypted = replay::parse_replay_bytes(&bytes).expect("parse");
-
-    let mut samples = Vec::new();
-    let mut server_ticks = Vec::new();
-    let mut headers = Vec::new();
-    let mut map_info: Option<replay::MapInfo> = None;
-    replay::walk_packets(
-        &decrypted.packet_data,
-        |clock, ptype| headers.push(analysis::PacketHeader { clock, ptype }),
-        |s| samples.push(s),
-        |c| server_ticks.push(c),
-        |m| {
-            if map_info.is_none() {
-                map_info = Some(m);
-            }
-        },
-    )
-    .expect("walk packets");
-
-    let region = replay::detect_realm(&decrypted.packet_data);
-    let arena_id = replay::build_from_client_version(&decrypted.meta.clientVersionFromExe)
-        .and_then(|build| replay::detect_arena_id(&decrypted.packet_data, build));
-
-    let result = analysis::build_analysis(
-        decrypted.meta,
-        samples,
-        server_ticks,
-        headers,
-        map_info,
-        arena_id,
-        region,
-        analysis::SpikeThresholds::default(),
-    );
+    let result = run_analysis(&bytes).expect("analysis");
 
     println!("=== {} ({}) ===", result.meta.player_vehicle, result.meta.player_name);
     println!("Map: {}  Mode: {}", result.meta.map_display_name, result.meta.game_type);

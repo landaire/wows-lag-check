@@ -1,5 +1,14 @@
-use crate::replay::NetStat;
 use serde::Serialize;
+use wows_replays::packet2::PacketTypeId;
+
+/// One PlayerNetStats observation, with the clock pulled from the packet header.
+#[derive(Debug, Clone, Copy)]
+pub struct NetStat {
+    pub clock: f32,
+    pub fps: u8,
+    pub ping: u16,
+    pub is_lagging: bool,
+}
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct PingSample {
@@ -37,7 +46,6 @@ pub struct ReplayMetaOut {
     pub arena_id: Option<String>,
     pub arena_id_hex: Option<String>,
     pub client_build: Option<u32>,
-    pub space_id: Option<u32>,
     /// Server/region extracted from the receivePlayerData pickle blob. None
     /// when no recognisable realm string was found.
     pub region: Option<String>,
@@ -99,20 +107,25 @@ impl Default for SpikeThresholds {
 
 pub struct PacketHeader {
     pub clock: f32,
-    pub ptype: u32,
+    pub ptype: PacketTypeId,
 }
 
-pub fn is_client_side_packet(ptype: u32) -> bool {
-    matches!(ptype, 0x25 | 0x18 | 0x1d)
+/// Camera, GunMarker, and PlayerNetStats are emitted locally by the client
+/// every tick (~30 Hz combined), independent of server traffic.
+pub fn is_client_side_packet(ptype: PacketTypeId) -> bool {
+    matches!(
+        ptype,
+        PacketTypeId::Camera | PacketTypeId::GunMarker | PacketTypeId::PlayerNetStats
+    )
 }
 
 pub fn build_analysis(
-    meta: crate::replay::ReplayMeta,
+    meta: wows_replays::ReplayMeta,
     samples: Vec<NetStat>,
     server_ticks: Vec<f32>,
     headers: Vec<PacketHeader>,
-    map_info: Option<crate::replay::MapInfo>,
     arena_id: Option<i64>,
+    client_build: Option<u32>,
     region: Option<&'static str>,
     thresholds: SpikeThresholds,
 ) -> AnalysisResult {
@@ -137,8 +150,6 @@ pub fn build_analysis(
     let battle_start_clock_approx_s = 30.94_f32;
     let severity = classify_severity(&spikes, battle_start_clock_approx_s);
 
-    let client_build = crate::replay::build_from_client_version(&meta.clientVersionFromExe);
-
     AnalysisResult {
         meta: ReplayMetaOut {
             map: meta.mapName,
@@ -155,7 +166,6 @@ pub fn build_analysis(
             arena_id: arena_id.map(|a| a.to_string()),
             arena_id_hex: arena_id.map(|a| format!("{:016x}", a as u64)),
             client_build,
-            space_id: map_info.map(|m| m.space_id),
             region: region.map(|r| r.to_string()),
         },
         battle_start_clock_approx_s,
