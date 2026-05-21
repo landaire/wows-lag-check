@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+@theme {
+  --color-server: oklch(0.74 0.18 35);
+  --color-client: oklch(0.78 0.15 290);
+}

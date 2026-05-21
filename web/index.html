@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WoWs Lag Check</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
+    <main class="max-w-5xl mx-auto px-4 py-8 space-y-6">
+      <header class="space-y-1">
+        <h1 class="text-2xl font-semibold tracking-tight">WoWs Lag Check</h1>
+        <p class="text-slate-400 text-sm">
+          Drop a <code class="text-slate-300">.wowsreplay</code> file to detect ping spikes and server stalls.
+          Everything runs locally in your browser; nothing is uploaded.
+        </p>
+      </header>
+
+      <section id="dropzone"
+        class="border-2 border-dashed border-slate-700 hover:border-sky-500 hover:bg-slate-900 transition rounded-xl px-6 py-10 text-center cursor-pointer"
+      >
+        <input id="fileInput" type="file" accept=".wowsreplay" class="hidden" />
+        <p class="text-slate-300">
+          <span class="text-sky-400 font-medium">Click to select</span> or drop a .wowsreplay file here
+        </p>
+        <p class="text-xs text-slate-500 mt-2">Replays live under <code>replays/</code> in your game install.</p>
+      </section>
+
+      <section id="status" class="hidden">
+        <div id="statusBox" class="rounded-lg px-4 py-3 text-sm"></div>
+      </section>
+
+      <section id="result" class="hidden space-y-6">
+        <div id="severityCard" class="rounded-xl border p-5 flex items-center gap-4">
+          <div id="severityDot" class="size-4 rounded-full shrink-0"></div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-baseline gap-3 flex-wrap">
+              <h2 id="severityLabel" class="text-2xl font-semibold tracking-tight"></h2>
+              <span id="severitySub" class="text-sm text-slate-400"></span>
+            </div>
+            <p id="severityHeadline" class="text-slate-300 mt-1"></p>
+          </div>
+          <div class="relative shrink-0">
+            <button id="copyBtn"
+              class="inline-flex items-center gap-2 rounded-lg border border-slate-700 hover:border-slate-500 bg-slate-900 hover:bg-slate-800 transition px-3 py-2 text-sm">
+              <svg xmlns="http://www.w3.org/2000/svg" class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <span id="copyBtnLabel">Copy for Discord</span>
+            </button>
+            <div id="copyPopover"
+              class="hidden absolute right-0 mt-2 w-72 z-10 rounded-lg border border-amber-700 bg-amber-950/95 text-amber-100 text-xs leading-relaxed px-3 py-2 shadow-lg">
+              Don't forget to attach the .wowsreplay file when you post.
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-3">
+          <div class="flex items-baseline justify-between">
+            <h2 class="text-lg font-semibold">Spikes</h2>
+            <p id="spikesNote" class="text-xs text-slate-500"></p>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="text-slate-400 text-xs uppercase tracking-wider border-b border-slate-800">
+                <tr>
+                  <th class="text-left py-2 pr-3 font-medium">Replay clock</th>
+                  <th class="text-left py-2 pr-3 font-medium">Battle time (approx)</th>
+                  <th class="text-right py-2 pr-3 font-medium">Gap</th>
+                  <th class="text-right py-2 pr-3 font-medium">Peak ping</th>
+                  <th class="text-left py-2 pr-3 font-medium">Stall type</th>
+                  <th class="text-right py-2 pr-3 font-medium">Client rate</th>
+                </tr>
+              </thead>
+              <tbody id="spikeRows" class="divide-y divide-slate-800"></tbody>
+            </table>
+          </div>
+          <p class="text-xs text-slate-500 leading-relaxed">
+            Battle time assumes a 30s pre-battle countdown (Random, Co-op, Ranked, Brawl).
+            Stall type is classified by the rate of client-only packets
+            (Camera + GunMarker + PlayerNetStats, ~30 Hz combined) seen inside the gap:
+            <span class="text-orange-300">server-only</span> means client packets kept flowing,
+            <span class="text-violet-300">client+server</span> means the client froze too.
+          </p>
+        </div>
+
+        <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-3">
+          <h2 class="text-sm font-medium">Ping and FPS over time</h2>
+          <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-300">
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-4 h-0.5 bg-sky-400"></span>ping (ms)</span>
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-4 h-0.5 bg-slate-500"></span>fps (0-144)</span>
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-orange-400/40 border border-orange-400/65"></span>server-only stall</span>
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-violet-400/45 border border-violet-400/85"></span>client+server stall</span>
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-4 border-t border-dashed border-slate-500"></span>battle start (20:00)</span>
+          </div>
+          <div id="chartWrap" class="overflow-x-auto"></div>
+        </div>
+
+        <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-3 text-sm text-slate-300">
+          <h2 class="text-sm font-medium">How this works</h2>
+          <dl class="grid sm:grid-cols-[max-content_1fr] gap-x-4 gap-y-2 leading-relaxed">
+            <dt class="text-slate-400">Gap</dt>
+            <dd>Time between two consecutive ServerTick packets (the game's "your client got an update" signal, normally fired ~7 times per second). A gap of 500 ms or more is flagged as a spike.</dd>
+
+            <dt class="text-slate-400">Peak ping</dt>
+            <dd>Highest ping value reported by the client (via PlayerNetStats, ~10 Hz) during the gap window plus a 2-second tail to catch the RTT estimate catching up after the stall ends.</dd>
+
+            <dt class="text-slate-400">Server-only stall</dt>
+            <dd>The client was alive throughout: local-only packets (Camera, GunMarker, PlayerNetStats; ~30 Hz combined) kept landing in the replay while server-driven packets stopped. The server (or the network between you and it) was the problem.</dd>
+
+            <dt class="text-slate-400">Client+server stall</dt>
+            <dd>Even the client's local packets dried up inside the gap. Either the client froze for unrelated reasons, or a long server stall blocked the network thread to the point the client couldn't tick. Classified by client packet rate &lt;= 5 Hz inside the gap.</dd>
+
+            <dt class="text-slate-400">Battle time</dt>
+            <dd>Replay clock minus 30 s (the standard pre-battle countdown for Random / Co-op / Ranked / Brawl). Approximate; Operations and Scenarios use different countdowns.</dd>
+          </dl>
+        </div>
+
+        <div class="grid md:grid-cols-3 gap-4">
+          <div class="md:col-span-2 rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-2">
+            <h2 class="text-xs uppercase tracking-wider text-slate-400">Replay</h2>
+            <dl id="metaList" class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm"></dl>
+          </div>
+          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-2">
+            <h2 class="text-xs uppercase tracking-wider text-slate-400">Ping</h2>
+            <dl id="pingStats" class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm"></dl>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

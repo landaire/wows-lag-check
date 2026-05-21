@@ -1,0 +1,35 @@
+[package]
+name = "wows-lag-check"
+version = "0.1.0"
+edition = "2024"
+description = "Highlight ping spikes in World of Warships replay files"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_json = "1"
+blowfish = "0.9"
+byteorder = "1"
+cipher = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+thiserror = "2"
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+default = ["console_error_panic_hook"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# rustc emits bulk-memory ops by default since 1.82; wasm-opt needs the matching flag.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

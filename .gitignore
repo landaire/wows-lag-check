@@ -1,0 +1,7 @@
+/target
+/dist
+/web/pkg
+Cargo.lock.bak
+.direnv
+result
+result-*
