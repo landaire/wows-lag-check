@@ -32,6 +32,9 @@ pub struct Spike {
     /// means the server fired repeated ticks without advancing the game clock
     /// just before freezing: a stutter burst.
     pub burst_ticks: u32,
+    /// Replay-clock seconds between the end of the previous spike and the
+    /// start of this one. None for the first spike in the replay.
+    pub seconds_since_previous_spike: Option<f32>,
     /// In-game events in the 2 s window before the spike started.
     pub preceding_events: Vec<GameEvent>,
 }
@@ -86,8 +89,9 @@ pub struct ReplayMetaOut {
     pub arena_id: Option<String>,
     pub arena_id_hex: Option<String>,
     pub client_build: Option<u32>,
-    /// Server/region extracted from the receivePlayerData pickle blob. None
-    /// when no recognisable realm string was found.
+    /// Server/region the match was played on. Read from the self-player's
+    /// state when entity defs are loaded; otherwise approximated by scanning
+    /// the decrypted packet bytes for pickle realm tokens.
     pub region: Option<String>,
 }
 
@@ -135,6 +139,11 @@ pub struct AnalysisResult {
     pub samples_total: u32,
     pub server_ticks_total: u32,
     pub replay_duration_s: f32,
+    /// Spike-detection threshold (ms) used to produce `spikes`. Mirrors the
+    /// `SpikeThresholds` passed into `build_analysis` so the UI can render a
+    /// label that matches the threshold these particular spikes were filtered
+    /// against, not whatever the slider currently reads.
+    pub spike_threshold_ms: u32,
     pub severity: SeveritySummary,
     /// True when entity definitions were loaded and the replay was parsed
     /// through the full parser (arena ID available).
@@ -181,7 +190,7 @@ pub fn build_analysis(
     mut events: Vec<GameEvent>,
     arena_id: Option<i64>,
     client_build: Option<u32>,
-    region: Option<&'static str>,
+    region: Option<String>,
     entity_defs_loaded: bool,
     game_params_loaded: bool,
     battle_start_clock: Option<f32>,
@@ -205,6 +214,12 @@ pub fn build_analysis(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut spikes = detect_spikes(&server_ticks, &samples, &headers, thresholds);
+    let mut prev_end: Option<f32> = None;
+    for spike in &mut spikes {
+        spike.seconds_since_previous_spike =
+            prev_end.map(|end| (spike.gap_start_clock - end).max(0.0));
+        prev_end = Some(spike.gap_end_clock);
+    }
     // The server can emit a burst of ticks all stamped with the same clock
     // (a stutter just before a freeze). Collapse those so a tick offset
     // counts distinct game-clock instants, not raw packets.
@@ -253,7 +268,7 @@ pub fn build_analysis(
             arena_id: arena_id.map(|a| a.to_string()),
             arena_id_hex: arena_id.map(|a| format!("{:016x}", a as u64)),
             client_build,
-            region: region.map(|r| r.to_string()),
+            region,
         },
         battle_start_clock_s,
         battle_start_clock_exact,
@@ -264,6 +279,7 @@ pub fn build_analysis(
         samples_total: samples.len() as u32,
         server_ticks_total: server_ticks.len() as u32,
         replay_duration_s,
+        spike_threshold_ms: (thresholds.min_gap_s * 1000.0).round() as u32,
         severity,
         entity_defs_loaded,
         game_params_loaded,
@@ -392,6 +408,7 @@ fn detect_spikes(
             client_rate_hz,
             client_present_during_gap,
             burst_ticks,
+            seconds_since_previous_spike: None,
             preceding_events: Vec::new(),
         });
     }

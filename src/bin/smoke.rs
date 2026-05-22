@@ -25,6 +25,7 @@ fn main() {
         &data.defs_bundle,
         &data.game_params,
         &data.translations,
+        None,
     )
     .expect("analysis");
 

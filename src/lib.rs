@@ -65,8 +65,9 @@ pub fn analyze_replay(
     defs_bundle: &[u8],
     game_params: &[u8],
     translations: &[u8],
+    threshold_ms: Option<u32>,
 ) -> Result<JsValue, JsError> {
-    let result = run_analysis(bytes, defs_bundle, game_params, translations)
+    let result = run_analysis(bytes, defs_bundle, game_params, translations, threshold_ms)
         .map_err(|e| JsError::new(&e))?;
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&format!("serialize: {e}")))
 }
@@ -81,11 +82,11 @@ pub fn run_analysis(
     defs_bundle: &[u8],
     game_params: &[u8],
     translations: &[u8],
+    threshold_ms: Option<u32>,
 ) -> Result<analysis::AnalysisResult, String> {
     let replay = ReplayFile::from_bytes(bytes).map_err(|e| format!("replay parse: {e}"))?;
 
     let build = replay::build_from_client_version(&replay.meta.clientVersionFromExe);
-    let region = replay::detect_realm(&replay.packet_data);
     let specs = load_entity_specs(defs_bundle)?;
     let resolver = NameResolver::load(game_params, translations);
 
@@ -95,6 +96,7 @@ pub fn run_analysis(
     let mut events: Vec<GameEvent> = Vec::new();
     let mut arena_id: Option<i64> = None;
     let mut battle_start_clock: Option<f32> = None;
+    let mut realm: Option<String> = None;
     let mut corrupt_packet_clocks: Vec<f32> = Vec::new();
 
     match &specs {
@@ -108,6 +110,7 @@ pub fn run_analysis(
             &mut events,
             &mut arena_id,
             &mut battle_start_clock,
+            &mut realm,
             &mut corrupt_packet_clocks,
         )?,
         None => {
@@ -134,6 +137,8 @@ pub fn run_analysis(
                     _ => {}
                 }
             }
+            // Spec-free fallback: pickle byte-scan for the realm string.
+            realm = replay::detect_realm(&replay.packet_data).map(str::to_string);
         }
     }
 
@@ -145,12 +150,16 @@ pub fn run_analysis(
         events,
         arena_id,
         build,
-        region,
+        realm,
         specs.is_some(),
         resolver.loaded(),
         battle_start_clock,
         corrupt_packet_clocks,
-        analysis::SpikeThresholds::default(),
+        threshold_ms
+            .map(|ms| analysis::SpikeThresholds {
+                min_gap_s: ms as f32 / 1000.0,
+            })
+            .unwrap_or_default(),
     ))
 }
 
@@ -167,6 +176,7 @@ fn decode_with_specs(
     events: &mut Vec<GameEvent>,
     arena_id: &mut Option<i64>,
     battle_start_clock: &mut Option<f32>,
+    realm: &mut Option<String>,
     corrupt_packet_clocks: &mut Vec<f32>,
 ) -> Result<(), String> {
     let version = Version::from_client_exe(&replay.meta.clientVersionFromExe);
@@ -179,7 +189,7 @@ fn decode_with_specs(
         .build();
 
     // Ship entity -> equipped death effect name, harvested from shipConfig.
-    let mut death_effects: HashMap<EntityId, &'static str> = HashMap::new();
+    let mut death_effects: HashMap<EntityId, String> = HashMap::new();
     // Ship entity -> equipped camouflage name, harvested from shipConfig.
     let mut camos: HashMap<EntityId, String> = HashMap::new();
     // Ship entity -> last visibilityFlags. Bit 0 = visible to the recording
@@ -219,6 +229,15 @@ fn decode_with_specs(
             } => {
                 if arena_id.is_none() {
                     *arena_id = Some(*aid);
+                }
+                if realm.is_none() {
+                    let self_realm = player_states
+                        .iter()
+                        .find(|p| p.username() == replay.meta.playerName)
+                        .and_then(|p| p.realm());
+                    *realm = self_realm
+                        .or_else(|| player_states.iter().find_map(|p| p.realm()))
+                        .map(str::to_string);
                 }
                 for p in player_states.iter().chain(bot_states.iter()) {
                     let ship_param_id = p.ship_params_id();
@@ -278,7 +297,7 @@ fn decode_with_specs(
                         event_ship(&ships, &camos, *killer),
                     ],
                     detail: death_cause_name(cause),
-                    death_effect: death_effects.get(killer).map(|e| e.to_string()),
+                    death_effect: death_effects.get(killer).cloned(),
                 });
             }
             DecodedPacketPayload::EntityProperty(ep) if ep.property == "battleStage" => {
@@ -356,7 +375,7 @@ fn index_ship_config(
     entity_id: EntityId,
     version: &Version,
     resolver: &NameResolver,
-    death_effects: &mut HashMap<EntityId, &'static str>,
+    death_effects: &mut HashMap<EntityId, String>,
     camos: &mut HashMap<EntityId, String>,
 ) {
     let Some(ArgValue::Blob(blob)) = props.get("shipConfig") else {
@@ -365,11 +384,16 @@ fn index_ship_config(
     let Ok(config) = parse_ship_config(blob, version) else {
         return;
     };
-    if let Some(effect) = config
-        .exteriors()
-        .iter()
-        .find_map(|id| replay::death_effect_name(id.raw()))
-    {
+    // Prefer GameParams when loaded; fall back to the hardcoded id dictionary
+    // so spec-free / no-game-data parses still get human-readable names.
+    let effect = resolver.death_effect_name(config.exteriors()).or_else(|| {
+        config
+            .exteriors()
+            .iter()
+            .find_map(|id| replay::death_effect_name(id.raw()))
+            .map(str::to_string)
+    });
+    if let Some(effect) = effect {
         death_effects.insert(entity_id, effect);
     }
     if let Some(camo) = resolver.camo_name(config.exteriors()) {
@@ -477,6 +501,29 @@ impl NameResolver {
                 Some(Species::Permoflage | Species::Camouflage | Species::Skin | Species::MSkin)
             );
             if is_camo
+                && let Some(name) = self.translate(&format!("IDS_{}", param.name().to_uppercase()))
+            {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// Display name of the death/kill effect in a ship's exteriors list. The
+    /// in-game `typeinfo.species` is `ShipDestruction`, which `wowsunpack`'s
+    /// `Species` enum carries as a `Recognized::Unknown` raw string. Uses the
+    /// same `IDS_{name}` uppercased translation key as cosmetics.
+    fn death_effect_name(&self, exteriors: &[GameParamId]) -> Option<String> {
+        for id in exteriors {
+            let Some(param) = self.by_id.get(id) else {
+                continue;
+            };
+            let is_death_effect = param
+                .species()
+                .and_then(|s| s.unknown())
+                .map(|raw| raw == "ShipDestruction")
+                .unwrap_or(false);
+            if is_death_effect
                 && let Some(name) = self.translate(&format!("IDS_{}", param.name().to_uppercase()))
             {
                 return Some(name);

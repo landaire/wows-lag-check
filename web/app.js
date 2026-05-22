@@ -1,5 +1,5 @@
 import init, { analyzeReplay, replayInfo } from "./pkg/wows_lag_check.js";
-import { html, render } from "./vendor/lit-html.js";
+import { html, render, svg } from "./vendor/lit-html.js";
 
 // Per-build game entity definitions, fetched on demand.
 const DATA_REPO = "landaire/wows-replay-data";
@@ -31,10 +31,20 @@ const copyBtnLabel = document.getElementById("copyBtnLabel");
 const copyPopover = document.getElementById("copyPopover");
 const copyChartBtn = document.getElementById("copyChartBtn");
 const copyChartBtnLabel = document.getElementById("copyChartBtnLabel");
+const thresholdSlider = document.getElementById("thresholdSlider");
+const thresholdLabel = document.getElementById("thresholdLabel");
+const thresholdReset = document.getElementById("thresholdReset");
 
 let wasmReady = init();
 let lastResult = null;
+/// Cached inputs for the most recently loaded replay, used when re-running
+/// analysis after a slider change without re-fetching game data.
+let lastInputs = null;
 let popoverTimer = null;
+
+const DEFAULT_THRESHOLD_MS = 500;
+let thresholdMs = DEFAULT_THRESHOLD_MS;
+let thresholdDebounce = null;
 
 const SEVERITY_STYLE = {
   clean:    { dot: "bg-emerald-400",  card: "border-emerald-700 bg-emerald-950/40",  label: "Clean",    sub: "No stalls detected" },
@@ -181,6 +191,39 @@ copyChartBtn.addEventListener("click", async () => {
   }
 });
 
+thresholdSlider.addEventListener("input", () => {
+  thresholdMs = parseInt(thresholdSlider.value, 10);
+  thresholdLabel.textContent = `${thresholdMs} ms`;
+  scheduleReanalyze();
+});
+
+thresholdReset.addEventListener("click", () => {
+  thresholdSlider.value = String(DEFAULT_THRESHOLD_MS);
+  thresholdMs = DEFAULT_THRESHOLD_MS;
+  thresholdLabel.textContent = `${DEFAULT_THRESHOLD_MS} ms`;
+  scheduleReanalyze();
+});
+
+/// Re-run analysis on the cached replay inputs after the slider settles. The
+/// WASM call is synchronous and can be slow for big replays, so we debounce
+/// while the user drags.
+function scheduleReanalyze() {
+  if (!lastInputs) return;
+  if (thresholdDebounce) clearTimeout(thresholdDebounce);
+  thresholdDebounce = setTimeout(() => {
+    thresholdDebounce = null;
+    const { bytes, defsBundle, gameParams, translations } = lastInputs;
+    try {
+      const result = analyzeReplay(bytes, defsBundle, gameParams, translations, thresholdMs);
+      lastResult = result;
+      renderResult(result);
+    } catch (err) {
+      console.error(err);
+      setStatus("error", `Re-analyze failed: ${err.message ?? err}`);
+    }
+  }, 150);
+}
+
 async function renderChartToPngBlob(svg) {
   const vb = svg.viewBox.baseVal;
   const scale = 2;
@@ -274,8 +317,9 @@ async function handleFile(file) {
     // Let the browser paint the spinner before the synchronous WASM call.
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
 
+    lastInputs = { bytes, defsBundle, gameParams, translations };
     const t0 = performance.now();
-    const result = analyzeReplay(bytes, defsBundle, gameParams, translations);
+    const result = analyzeReplay(bytes, defsBundle, gameParams, translations, thresholdMs);
     const ms = (performance.now() - t0).toFixed(0);
     let dataNote = "";
     if (!result.entity_defs_loaded) dataNote = " (entity defs unavailable)";
@@ -448,6 +492,17 @@ function fmtBattleClock(replayClock, battleStart) {
   return fmtClock(elapsed);
 }
 
+/// Format an interval in seconds as MM:SS:mmm (two-digit minutes and seconds,
+/// three-digit milliseconds). Returns an empty string for null/missing/negative.
+function fmtSinceLast(seconds) {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "";
+  const totalMs = Math.round(seconds * 1000);
+  const m = Math.floor(totalMs / 60000);
+  const s = Math.floor((totalMs % 60000) / 1000);
+  const ms = totalMs % 1000;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}:${String(ms).padStart(3, "0")}`;
+}
+
 function renderResult(r) {
   resultSection.classList.remove("hidden");
 
@@ -462,7 +517,7 @@ function renderResult(r) {
   battleTimeHeader.textContent = r.battle_start_clock_exact ? "Battle time" : "Battle time (approx)";
   render(spikeRowsTemplate(r), spikeRows);
   spikesNote.textContent = r.spikes.length
-    ? `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= 500 ms`
+    ? `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= ${r.spike_threshold_ms} ms`
     : "";
 
   // One players table for the whole section, so ships aren't repeated per spike.
@@ -510,7 +565,7 @@ function renderResult(r) {
 /// spikes that have a stutter burst or preceding events.
 function spikeRowsTemplate(r) {
   if (r.spikes.length === 0) {
-    return html`<tr><td colspan="6" class="py-3 text-slate-500">No gaps over 500 ms detected.</td></tr>`;
+    return html`<tr><td colspan="7" class="py-3 text-slate-500">No gaps over ${r.spike_threshold_ms} ms detected.</td></tr>`;
   }
   return r.spikes.map((s) => spikeRow(s, r));
 }
@@ -519,10 +574,12 @@ function spikeRow(s, r) {
   const stallColor = s.client_present_during_gap ? "bg-orange-400" : "bg-violet-400";
   const stallLabel = s.client_present_during_gap ? "server-only" : "client+server";
   const gapClass = s.gap_seconds > 2 ? "text-rose-300 font-semibold" : "text-slate-200";
+  const sinceLast = fmtSinceLast(s.seconds_since_previous_spike);
   const mainRow = html`
     <tr class="hover:bg-slate-800/50 border-t border-slate-800">
       <td class="py-2 pr-3 font-mono text-slate-300">${fmtClock(s.gap_start_clock)}</td>
       <td class="py-2 pr-3 font-mono text-slate-300">${fmtBattleClock(s.gap_start_clock, r.battle_start_clock_s)}</td>
+      <td class="py-2 pr-3 text-right font-mono text-slate-400">${sinceLast || html`<span class="text-slate-600">-</span>`}</td>
       <td class="py-2 pr-3 text-right font-mono ${gapClass}">${(s.gap_seconds * 1000).toFixed(0)} ms</td>
       <td class="py-2 pr-3 text-right font-mono text-slate-200">${s.peak_ping_ms} ms</td>
       <td class="py-2 pr-3">
@@ -539,7 +596,7 @@ function spikeRow(s, r) {
 
   return html`${mainRow}
     <tr class="bg-slate-900/60">
-      <td colspan="6" class="pb-2 pl-4 pr-3">
+      <td colspan="7" class="pb-2 pl-4 pr-3">
         <div class="text-xs text-slate-400 space-y-0.5">
           ${hasBurst
             ? html`<div class="text-orange-300/90">Server stutter: ${s.burst_ticks} server ticks stamped the same clock before the freeze</div>`
@@ -658,7 +715,7 @@ ${arenaLine}
 `;
 
   if (r.spikes.length > 0) {
-    body += `\n**Spikes** (gaps >= 500 ms):\n\`\`\`\n`;
+    body += `\n**Spikes** (gaps >= ${r.spike_threshold_ms} ms):\n\`\`\`\n`;
     body += `battle  gap     peak   type\n`;
     body += `------  ------  -----  --------------\n`;
     for (const s of r.spikes) {
@@ -727,21 +784,21 @@ function renderChart(r) {
   }
 
   const yTicks = [0, Math.round(yMax / 4), Math.round(yMax / 2), Math.round((3 * yMax) / 4), Math.round(yMax)];
-  const yTickLines = yTicks.map((t) =>
-    `<line x1="${pad.l}" x2="${pad.l + innerW}" y1="${y(t)}" y2="${y(t)}" stroke="#1e293b" stroke-width="1"/>`
-  ).join("");
-  const yTickLabels = yTicks.map((t) =>
-    `<text x="${pad.l - 8}" y="${y(t) + 4}" text-anchor="end" fill="#64748b" font-size="11" font-family="ui-monospace, monospace">${t}</text>`
-  ).join("");
+  const yTickLines = yTicks.map((t) => svg`
+    <line x1=${pad.l} x2=${pad.l + innerW} y1=${y(t)} y2=${y(t)} stroke="#1e293b" stroke-width="1"/>
+  `);
+  const yTickLabels = yTicks.map((t) => svg`
+    <text x=${pad.l - 8} y=${y(t) + 4} text-anchor="end" fill="#64748b" font-size="11" font-family="ui-monospace, monospace">${t}</text>
+  `);
 
   const xTicks = [];
   for (let s = 0; s <= xMax; s += 60) xTicks.push(s);
-  const xTickLines = xTicks.map((t) =>
-    `<line x1="${x(t)}" x2="${x(t)}" y1="${pad.t}" y2="${pad.t + innerH}" stroke="#1e293b" stroke-width="1"/>`
-  ).join("");
-  const xTickLabels = xTicks.map((t) =>
-    `<text x="${x(t)}" y="${pad.t + innerH + 16}" text-anchor="middle" fill="#64748b" font-size="11" font-family="ui-monospace, monospace">${fmtClock(t).slice(0, 5)}</text>`
-  ).join("");
+  const xTickLines = xTicks.map((t) => svg`
+    <line x1=${x(t)} x2=${x(t)} y1=${pad.t} y2=${pad.t + innerH} stroke="#1e293b" stroke-width="1"/>
+  `);
+  const xTickLabels = xTicks.map((t) => svg`
+    <text x=${x(t)} y=${pad.t + innerH + 16} text-anchor="middle" fill="#64748b" font-size="11" font-family="ui-monospace, monospace">${fmtClock(t).slice(0, 5)}</text>
+  `);
 
   const spikeBands = r.spikes.map((s) => {
     const xs = x(s.gap_start_clock);
@@ -749,25 +806,61 @@ function renderChart(r) {
     const w = Math.max(2, xe - xs);
     const fill = s.client_present_during_gap ? "rgba(251,146,60,0.32)" : "rgba(167,139,250,0.42)";
     const stroke = s.client_present_during_gap ? "rgba(251,146,60,0.65)" : "rgba(167,139,250,0.85)";
-    return `<rect x="${xs}" y="${pad.t}" width="${w}" height="${innerH}" fill="${fill}" stroke="${stroke}" stroke-width="1"/>`;
-  }).join("");
+    return svg`<rect x=${xs} y=${pad.t} width=${w} height=${innerH} fill=${fill} stroke=${stroke} stroke-width="1"/>`;
+  });
+
+  // Annotate the quiet interval between adjacent spike bands. End caps and a
+  // dashed line span the lull; the label sits on a darkened pill so it stays
+  // readable regardless of the underlying chart content.
+  const sinceLineY = pad.t + 8;
+  const sinceY = pad.t + 22;
+  const LABEL_HALF_PX = 40;
+  const MIN_LABEL_PX = 110;
+  const TICK_HALF = 5;
+  const sinceAnnotations = r.spikes.slice(1).flatMap((s, i) => {
+    const prev = r.spikes[i];
+    const idle = s.gap_start_clock - prev.gap_end_clock;
+    if (!(idle > 0)) return [];
+    const x1 = x(prev.gap_end_clock);
+    const x2 = x(s.gap_start_clock);
+    if (x2 - x1 < MIN_LABEL_PX) return [];
+    const mid = (x1 + x2) / 2;
+    const labelLeft = mid - LABEL_HALF_PX;
+    const labelRight = mid + LABEL_HALF_PX;
+    return [svg`
+      <line x1=${x1} x2=${labelLeft} y1=${sinceLineY} y2=${sinceLineY} stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 3"/>
+      <line x1=${labelRight} x2=${x2} y1=${sinceLineY} y2=${sinceLineY} stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 3"/>
+      <line x1=${x1} x2=${x1} y1=${sinceLineY - TICK_HALF} y2=${sinceLineY + TICK_HALF} stroke="#94a3b8" stroke-width="2"/>
+      <line x1=${x2} x2=${x2} y1=${sinceLineY - TICK_HALF} y2=${sinceLineY + TICK_HALF} stroke="#94a3b8" stroke-width="2"/>
+      <rect x=${labelLeft} y=${sinceLineY + 2} width=${LABEL_HALF_PX * 2} height="16" rx="3" fill="rgba(15,23,42,0.85)" stroke="#334155" stroke-width="1"/>
+      <text x=${mid} y=${sinceY} text-anchor="middle" fill="#f1f5f9" font-size="12" font-family="ui-monospace, monospace" font-weight="500">${fmtSinceLast(idle)}</text>
+    `];
+  });
 
   const bx = x(r.battle_start_clock_s);
-  const battleMarker = `
-    <line x1="${bx}" x2="${bx}" y1="${pad.t}" y2="${pad.t + innerH}" stroke="#475569" stroke-width="1" stroke-dasharray="3 3"/>
-    <text x="${bx + 4}" y="${pad.t + 12}" fill="#94a3b8" font-size="10">battle 0:00</text>
+  const battleMarker = svg`
+    <line x1=${bx} x2=${bx} y1=${pad.t} y2=${pad.t + innerH} stroke="#475569" stroke-width="1" stroke-dasharray="3 3"/>
+    <text x=${bx + 4} y=${pad.t + 12} fill="#94a3b8" font-size="10">battle start</text>
   `;
 
-  chartWrap.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" style="width:100%; min-width:760px; height:${height}px;">
-      ${yTickLines}
-      ${xTickLines}
-      ${spikeBands}
-      ${battleMarker}
-      <polyline points="${fpsPts.join(" ")}" fill="none" stroke="#64748b" stroke-width="1" stroke-opacity="0.6"/>
-      <polyline points="${pingPts.join(" ")}" fill="none" stroke="#38bdf8" stroke-width="1.4"/>
-      ${yTickLabels}
-      ${xTickLabels}
-    </svg>
-  `;
+  render(
+    html`
+      <svg
+        viewBox="0 0 ${width} ${height}"
+        preserveAspectRatio="none"
+        style="width:100%; min-width:760px; height:${height}px;"
+      >
+        ${yTickLines}
+        ${xTickLines}
+        ${spikeBands}
+        ${sinceAnnotations}
+        ${battleMarker}
+        <polyline points=${fpsPts.join(" ")} fill="none" stroke="#64748b" stroke-width="1" stroke-opacity="0.6"/>
+        <polyline points=${pingPts.join(" ")} fill="none" stroke="#38bdf8" stroke-width="1.4"/>
+        ${yTickLabels}
+        ${xTickLabels}
+      </svg>
+    `,
+    chartWrap,
+  );
 }
