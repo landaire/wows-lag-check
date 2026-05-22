@@ -7,17 +7,23 @@ use std::collections::HashMap;
 use gettext::Catalog;
 use wasm_bindgen::prelude::*;
 use wows_replays::ReplayFile;
-use wows_replays::analyzer::decoder::{DecodedPacketPayload, PacketDecoder};
+use wows_replays::analyzer::decoder::DecodedPacketPayload;
+use wows_replays::analyzer::decoder::PacketDecoder;
 use wows_replays::game_constants::GameConstants;
-use wows_replays::packet2::{PacketTypeId, Parser, PlayerNetStatsPacket, RawPacketIterator};
+use wows_replays::packet2::PacketTypeId;
+use wows_replays::packet2::Parser;
+use wows_replays::packet2::PlayerNetStatsPacket;
+use wows_replays::packet2::RawPacketIterator;
 use wows_replays::types::EntityId;
-use wowsunpack::data::Version;
 use wowsunpack::data::DataFileWithCallback;
+use wowsunpack::data::Version;
 use wowsunpack::data::ship_config::parse_ship_config;
 use wowsunpack::error::GameDataError;
-use wowsunpack::game_params::types::{Param, Species};
+use wowsunpack::game_params::types::Param;
+use wowsunpack::game_params::types::Species;
 use wowsunpack::game_types::GameParamId;
-use wowsunpack::rpc::entitydefs::{EntitySpec, parse_scripts};
+use wowsunpack::rpc::entitydefs::EntitySpec;
+use wowsunpack::rpc::entitydefs::parse_scripts;
 use wowsunpack::rpc::typedefs::ArgValue;
 
 use analysis::GameEvent;
@@ -42,7 +48,8 @@ struct ReplayInfo {
 
 #[wasm_bindgen(js_name = replayInfo)]
 pub fn replay_info(bytes: &[u8]) -> Result<JsValue, JsError> {
-    let replay = ReplayFile::from_bytes(bytes).map_err(|e| JsError::new(&format!("replay parse: {e}")))?;
+    let replay =
+        ReplayFile::from_bytes(bytes).map_err(|e| JsError::new(&format!("replay parse: {e}")))?;
     let v = &replay.meta.clientVersionFromExe;
     let info = ReplayInfo {
         client_version: v.clone(),
@@ -59,7 +66,8 @@ pub fn analyze_replay(
     game_params: &[u8],
     translations: &[u8],
 ) -> Result<JsValue, JsError> {
-    let result = run_analysis(bytes, defs_bundle, game_params, translations).map_err(|e| JsError::new(&e))?;
+    let result = run_analysis(bytes, defs_bundle, game_params, translations)
+        .map_err(|e| JsError::new(&e))?;
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&format!("serialize: {e}")))
 }
 
@@ -112,7 +120,10 @@ pub fn run_analysis(
                     continue;
                 }
                 last_valid_clock = clock;
-                headers.push(analysis::PacketHeader { clock, ptype: packet.packet_type });
+                headers.push(analysis::PacketHeader {
+                    clock,
+                    ptype: packet.packet_type,
+                });
                 match packet.packet_type {
                     PacketTypeId::PlayerNetStats => {
                         if let Some(ns) = PlayerNetStatsPacket::from_payload(packet.payload) {
@@ -191,7 +202,10 @@ fn decode_with_specs(
             continue;
         }
         last_valid_clock = clock;
-        headers.push(analysis::PacketHeader { clock, ptype: packet.packet_type });
+        headers.push(analysis::PacketHeader {
+            clock,
+            ptype: packet.packet_type,
+        });
 
         let decoded = decoder.decode(&packet);
         match &decoded.payload {
@@ -219,12 +233,28 @@ fn decode_with_specs(
                 }
             }
             DecodedPacketPayload::EntityCreate(ec) => {
-                index_ship_config(&ec.props, ec.entity_id, &version, resolver, &mut death_effects, &mut camos);
+                index_ship_config(
+                    &ec.props,
+                    ec.entity_id,
+                    &version,
+                    resolver,
+                    &mut death_effects,
+                    &mut camos,
+                );
             }
             DecodedPacketPayload::CellPlayerCreate(cpc) => {
-                index_ship_config(&cpc.props, cpc.entity_id, &version, resolver, &mut death_effects, &mut camos);
+                index_ship_config(
+                    &cpc.props,
+                    cpc.entity_id,
+                    &version,
+                    resolver,
+                    &mut death_effects,
+                    &mut camos,
+                );
             }
-            DecodedPacketPayload::Consumable { entity, consumable, .. } => {
+            DecodedPacketPayload::Consumable {
+                entity, consumable, ..
+            } => {
                 events.push(GameEvent {
                     clock,
                     tick_offset: 0,
@@ -234,7 +264,11 @@ fn decode_with_specs(
                     death_effect: None,
                 });
             }
-            DecodedPacketPayload::ShipDestroyed { killer, victim, cause } => {
+            DecodedPacketPayload::ShipDestroyed {
+                killer,
+                victim,
+                cause,
+            } => {
                 events.push(GameEvent {
                     clock,
                     tick_offset: 0,
@@ -277,7 +311,12 @@ fn decode_with_specs(
 }
 
 fn net_stat(clock: f32, ns: &PlayerNetStatsPacket) -> analysis::NetStat {
-    analysis::NetStat { clock, fps: ns.fps, ping: ns.ping, is_lagging: ns.is_lagging }
+    analysis::NetStat {
+        clock,
+        fps: ns.fps,
+        ping: ns.ping,
+        is_lagging: ns.is_lagging,
+    }
 }
 
 /// Player name, ship param id, and ship display name for one ship entity.
@@ -326,7 +365,11 @@ fn index_ship_config(
     let Ok(config) = parse_ship_config(blob, version) else {
         return;
     };
-    if let Some(effect) = config.exteriors().iter().find_map(|id| replay::death_effect_name(id.raw())) {
+    if let Some(effect) = config
+        .exteriors()
+        .iter()
+        .find_map(|id| replay::death_effect_name(id.raw()))
+    {
         death_effects.insert(entity_id, effect);
     }
     if let Some(camo) = resolver.camo_name(config.exteriors()) {
@@ -334,14 +377,18 @@ fn index_ship_config(
     }
 }
 
-fn consumable_name(c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::Consumable>) -> String {
+fn consumable_name(
+    c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::Consumable>,
+) -> String {
     match c.known() {
         Some(known) => format!("{known:?}"),
         None => "Consumable".to_string(),
     }
 }
 
-fn death_cause_name(c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::DeathCause>) -> String {
+fn death_cause_name(
+    c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::DeathCause>,
+) -> String {
     match c.known() {
         Some(known) => format!("{known:?}"),
         None => "unknown".to_string(),
@@ -403,7 +450,11 @@ impl NameResolver {
     fn translate(&self, key: &str) -> Option<String> {
         let catalog = self.catalog.as_ref()?;
         let value = catalog.gettext(key);
-        if value == key { None } else { Some(value.to_string()) }
+        if value == key {
+            None
+        } else {
+            Some(value.to_string())
+        }
     }
 
     /// Display name for a ship param id, e.g. "Utrecht".
@@ -445,7 +496,11 @@ fn load_entity_specs(defs_bundle: &[u8]) -> Result<Option<Vec<EntitySpec>>, Stri
         files
             .get(path)
             .map(|v| Cow::Owned(v.clone()))
-            .ok_or_else(|| GameDataError::Io(std::io::Error::other(format!("missing bundled file: {path}"))))
+            .ok_or_else(|| {
+                GameDataError::Io(std::io::Error::other(format!(
+                    "missing bundled file: {path}"
+                )))
+            })
     });
     let specs = parse_scripts(&loader).map_err(|e| format!("entity defs: {e}"))?;
     Ok(Some(specs))

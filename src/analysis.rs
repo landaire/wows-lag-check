@@ -199,7 +199,11 @@ pub fn build_analysis(
         .collect();
 
     let ping_stats = compute_ping_stats(&samples);
-    events.sort_by(|a, b| a.clock.partial_cmp(&b.clock).unwrap_or(std::cmp::Ordering::Equal));
+    events.sort_by(|a, b| {
+        a.clock
+            .partial_cmp(&b.clock)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut spikes = detect_spikes(&server_ticks, &samples, &headers, thresholds);
     // The server can emit a burst of ticks all stamped with the same clock
     // (a stutter just before a freeze). Collapse those so a tick offset
@@ -225,10 +229,7 @@ pub fn build_analysis(
             .collect();
     }
 
-    let replay_duration_s = headers
-        .iter()
-        .map(|h| h.clock)
-        .fold(0.0_f32, f32::max);
+    let replay_duration_s = headers.iter().map(|h| h.clock).fold(0.0_f32, f32::max);
 
     // Real start when entity defs captured BattleLogic.battleStage; otherwise
     // the 30.94s heuristic that matches Random/Co-op/Ranked/Brawl countdowns.
@@ -273,11 +274,15 @@ pub fn build_analysis(
 fn classify_severity(spikes: &[Spike], battle_start: f32) -> SeveritySummary {
     let spike_count = spikes.len() as u32;
     let total_stalled_s: f32 = spikes.iter().map(|s| s.gap_seconds).sum();
-    let worst = spikes
-        .iter()
-        .max_by(|a, b| a.gap_seconds.partial_cmp(&b.gap_seconds).unwrap_or(std::cmp::Ordering::Equal));
+    let worst = spikes.iter().max_by(|a, b| {
+        a.gap_seconds
+            .partial_cmp(&b.gap_seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let worst_gap_s = worst.map(|s| s.gap_seconds).unwrap_or(0.0);
-    let worst_gap_battle_s = worst.map(|s| s.gap_start_clock - battle_start).unwrap_or(0.0);
+    let worst_gap_battle_s = worst
+        .map(|s| s.gap_start_clock - battle_start)
+        .unwrap_or(0.0);
 
     let severity = if spike_count == 0 {
         Severity::Clean
@@ -300,12 +305,24 @@ fn classify_severity(spikes: &[Spike], battle_start: f32) -> SeveritySummary {
         ),
     };
 
-    SeveritySummary { severity, spike_count, total_stalled_s, worst_gap_s, worst_gap_battle_s, headline }
+    SeveritySummary {
+        severity,
+        spike_count,
+        total_stalled_s,
+        worst_gap_s,
+        worst_gap_battle_s,
+        headline,
+    }
 }
 
 fn compute_ping_stats(samples: &[NetStat]) -> PingStats {
     if samples.is_empty() {
-        return PingStats { min_ms: 0, max_ms: 0, mean_ms: 0.0, p95_ms: 0 };
+        return PingStats {
+            min_ms: 0,
+            max_ms: 0,
+            mean_ms: 0.0,
+            p95_ms: 0,
+        };
     }
     let mut pings: Vec<u16> = samples.iter().map(|s| s.ping).collect();
     pings.sort_unstable();
@@ -315,7 +332,12 @@ fn compute_ping_stats(samples: &[NetStat]) -> PingStats {
     let mean_ms = (sum as f64 / pings.len() as f64) as f32;
     let idx = ((pings.len() as f64) * 0.95).floor() as usize;
     let p95_ms = pings[idx.min(pings.len() - 1)];
-    PingStats { min_ms, max_ms, mean_ms, p95_ms }
+    PingStats {
+        min_ms,
+        max_ms,
+        mean_ms,
+        p95_ms,
+    }
 }
 
 fn detect_spikes(
@@ -353,7 +375,11 @@ fn detect_spikes(
             .max_by_key(|(p, _)| *p)
             .unwrap_or((0, prev));
 
-        let client_rate_hz = if gap > 0.0 { client_packets_in_gap as f32 / gap } else { 0.0 };
+        let client_rate_hz = if gap > 0.0 {
+            client_packets_in_gap as f32 / gap
+        } else {
+            0.0
+        };
         let client_present_during_gap = client_rate_hz > 5.0;
 
         spikes.push(Spike {

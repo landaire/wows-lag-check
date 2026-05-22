@@ -20,11 +20,22 @@ fn main() {
         .map(|d| BuildData::load(Path::new(d)))
         .unwrap_or_default();
 
-    let result = run_analysis(&bytes, &data.defs_bundle, &data.game_params, &data.translations)
-        .expect("analysis");
+    let result = run_analysis(
+        &bytes,
+        &data.defs_bundle,
+        &data.game_params,
+        &data.translations,
+    )
+    .expect("analysis");
 
-    println!("=== {} ({}) ===", result.meta.player_vehicle, result.meta.player_name);
-    println!("Map: {}  Mode: {}", result.meta.map_display_name, result.meta.game_type);
+    println!(
+        "=== {} ({}) ===",
+        result.meta.player_vehicle, result.meta.player_name
+    );
+    println!(
+        "Map: {}  Mode: {}",
+        result.meta.map_display_name, result.meta.game_type
+    );
     println!("Client: {}", result.meta.client_version);
     println!("Entity defs loaded: {}", result.entity_defs_loaded);
     println!("Game params loaded: {}", result.game_params_loaded);
@@ -32,9 +43,15 @@ fn main() {
         (Some(d), Some(h)) => println!("Arena ID: {d} (0x{h})"),
         _ => println!("Arena ID: (not found)"),
     }
-    println!("Server:   {}", result.meta.region.as_deref().unwrap_or("(unknown)"));
+    println!(
+        "Server:   {}",
+        result.meta.region.as_deref().unwrap_or("(unknown)")
+    );
     println!("Battle start clock: {:.3}s", result.battle_start_clock_s);
-    println!("Severity: {:?} ({})", result.severity.severity, result.severity.headline);
+    println!(
+        "Severity: {:?} ({})",
+        result.severity.severity, result.severity.headline
+    );
     println!();
     println!("PlayerNetStats samples: {}", result.samples_total);
     println!("ServerTick packets:    {}", result.server_ticks_total);
@@ -42,7 +59,11 @@ fn main() {
     if result.corrupt_packet_clocks.is_empty() {
         println!("Corrupt-clock packets: 0");
     } else {
-        let cs: Vec<String> = result.corrupt_packet_clocks.iter().map(|c| format!("{c:.1}s")).collect();
+        let cs: Vec<String> = result
+            .corrupt_packet_clocks
+            .iter()
+            .map(|c| format!("{c:.1}s"))
+            .collect();
         println!(
             "Corrupt-clock packets: {} (at {})",
             result.corrupt_packet_clocks.len(),
@@ -53,7 +74,11 @@ fn main() {
     println!("=== {} spikes (gap >= 500ms) ===", result.spikes.len());
     for s in &result.spikes {
         let bt = (s.gap_start_clock - result.battle_start_clock_s).max(0.0);
-        let kind = if s.client_present_during_gap { "server-only" } else { "client+server" };
+        let kind = if s.client_present_during_gap {
+            "server-only"
+        } else {
+            "client+server"
+        };
         let burst = if s.burst_ticks > 1 {
             format!("  burst {} ticks", s.burst_ticks)
         } else {
@@ -71,7 +96,11 @@ fn main() {
         );
         for ev in &s.preceding_events {
             let players: Vec<&str> = ev.ships.iter().map(|sh| sh.player.as_str()).collect();
-            let effect = ev.death_effect.as_deref().map(|e| format!(" [{e}]")).unwrap_or_default();
+            let effect = ev
+                .death_effect
+                .as_deref()
+                .map(|e| format!(" [{e}]"))
+                .unwrap_or_default();
             println!(
                 "        -{:.2}s ({} ticks)  [{}] {} {}{}",
                 s.gap_start_clock - ev.clock,
@@ -86,7 +115,9 @@ fn main() {
                     "              {} | entity {} | ship {} | {} | camo {}",
                     sh.player,
                     sh.entity_id,
-                    sh.ship_param_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                    sh.ship_param_id
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "-".into()),
                     sh.ship_name.as_deref().unwrap_or("-"),
                     sh.camo.as_deref().unwrap_or("-"),
                 );
@@ -140,15 +171,23 @@ fn bundle_entity_defs(build_dir: &Path) -> Vec<u8> {
 }
 
 fn collect_files(dir: &Path, vfs_root: &Path, out: &mut Vec<(String, Vec<u8>)>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         // fs::metadata follows symlinks (the dump uses CAS symlinks).
-        let Ok(meta) = fs::metadata(&path) else { continue };
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
         if meta.is_dir() {
             collect_files(&path, vfs_root, out);
         } else if let Ok(content) = fs::read(&path) {
-            let key = path.strip_prefix(vfs_root).unwrap().to_string_lossy().replace('\\', "/");
+            let key = path
+                .strip_prefix(vfs_root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
             out.push((key, content));
         }
     }

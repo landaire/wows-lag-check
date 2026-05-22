@@ -15,7 +15,10 @@ pub fn version_dir_name(s: &str) -> Option<String> {
     if parts.len() != 4 {
         return None;
     }
-    Some(format!("{}.{}.{}_{}", parts[0], parts[1], parts[2], parts[3]))
+    Some(format!(
+        "{}.{}.{}_{}",
+        parts[0], parts[1], parts[2], parts[3]
+    ))
 }
 
 /// Unpack the entity-def bundle assembled by the JS layer. Format (all
@@ -26,7 +29,8 @@ pub fn unpack_def_bundle(bundle: &[u8]) -> Option<HashMap<String, Vec<u8>>> {
     let mut map = HashMap::new();
     let mut cur = 0usize;
     let read_u32 = |b: &[u8], at: usize| -> Option<usize> {
-        b.get(at..at + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()) as usize)
+        b.get(at..at + 4)
+            .map(|s| u32::from_le_bytes(s.try_into().unwrap()) as usize)
     };
 
     let count = read_u32(bundle, cur)?;
@@ -34,7 +38,9 @@ pub fn unpack_def_bundle(bundle: &[u8]) -> Option<HashMap<String, Vec<u8>>> {
     for _ in 0..count {
         let path_len = read_u32(bundle, cur)?;
         cur += 4;
-        let path = std::str::from_utf8(bundle.get(cur..cur + path_len)?).ok()?.to_string();
+        let path = std::str::from_utf8(bundle.get(cur..cur + path_len)?)
+            .ok()?
+            .to_string();
         cur += path_len;
         let content_len = read_u32(bundle, cur)?;
         cur += 4;
