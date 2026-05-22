@@ -28,7 +28,34 @@ pub struct Spike {
     pub client_packets_in_gap: u32,
     pub client_rate_hz: f32,
     pub client_present_during_gap: bool,
+    /// ServerTick packets stamped with the gap-start clock. A value above 1
+    /// means the server fired repeated ticks without advancing the game clock
+    /// just before freezing: a stutter burst.
+    pub burst_ticks: u32,
+    /// In-game events in the 2 s window before the spike started.
+    pub preceding_events: Vec<GameEvent>,
 }
+
+/// An in-game event used to give context to a spike. `kind` is one of
+/// "consumable", "kill", "spotted"; `text` is a human-readable summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameEvent {
+    pub clock: f32,
+    /// Distinct server-tick instants between this event and the spike it
+    /// precedes (negative = before the spike). Filled in when the event is
+    /// attached to a spike.
+    pub tick_offset: i32,
+    pub kind: String,
+    pub text: String,
+    /// Entity ID of the ship the event concerns (spotted ship / kill victim).
+    pub entity_id: Option<u32>,
+    /// Numeric ship GameParamId of that ship, when known from the arena state.
+    /// The textual index (e.g. "PNSC010") needs GameParams and is not resolved.
+    pub ship_param_id: Option<u64>,
+}
+
+/// How far before a spike to collect context events.
+pub const EVENT_WINDOW_S: f32 = 2.0;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReplayMetaOut {
@@ -92,6 +119,9 @@ pub struct AnalysisResult {
     pub server_ticks_total: u32,
     pub replay_duration_s: f32,
     pub severity: SeveritySummary,
+    /// True when entity definitions were loaded and the replay was parsed
+    /// through the full parser (arena ID available).
+    pub entity_defs_loaded: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,8 +140,8 @@ pub struct PacketHeader {
     pub ptype: PacketTypeId,
 }
 
-/// Camera, GunMarker, and PlayerNetStats are emitted locally by the client
-/// every tick (~30 Hz combined), independent of server traffic.
+/// Camera, GunMarker, and PlayerNetStats are each emitted on a 10 Hz client
+/// timer (~30 Hz combined), independent of the 7 Hz server tick.
 pub fn is_client_side_packet(ptype: PacketTypeId) -> bool {
     matches!(
         ptype,
@@ -124,9 +154,11 @@ pub fn build_analysis(
     samples: Vec<NetStat>,
     server_ticks: Vec<f32>,
     headers: Vec<PacketHeader>,
+    mut events: Vec<GameEvent>,
     arena_id: Option<i64>,
     client_build: Option<u32>,
     region: Option<&'static str>,
+    entity_defs_loaded: bool,
     thresholds: SpikeThresholds,
 ) -> AnalysisResult {
     let samples_out: Vec<PingSample> = samples
@@ -140,7 +172,31 @@ pub fn build_analysis(
         .collect();
 
     let ping_stats = compute_ping_stats(&samples);
-    let spikes = detect_spikes(&server_ticks, &samples, &headers, thresholds);
+    events.sort_by(|a, b| a.clock.partial_cmp(&b.clock).unwrap_or(std::cmp::Ordering::Equal));
+    let mut spikes = detect_spikes(&server_ticks, &samples, &headers, thresholds);
+    // The server can emit a burst of ticks all stamped with the same clock
+    // (a stutter just before a freeze). Collapse those so a tick offset
+    // counts distinct game-clock instants, not raw packets.
+    let mut distinct_ticks = server_ticks.clone();
+    distinct_ticks.dedup();
+
+    for spike in &mut spikes {
+        let lo = spike.gap_start_clock - EVENT_WINDOW_S;
+        let hi = spike.gap_start_clock;
+        // distinct_ticks is monotonic, so partition_point counts ticks at or
+        // before a clock. The offset is event-tick-count minus spike-tick-count.
+        let gap_ticks = distinct_ticks.partition_point(|&t| t <= spike.gap_start_clock) as i32;
+        spike.preceding_events = events
+            .iter()
+            .filter(|e| e.clock >= lo && e.clock <= hi)
+            .map(|e| {
+                let mut e = e.clone();
+                let event_ticks = distinct_ticks.partition_point(|&t| t <= e.clock) as i32;
+                e.tick_offset = event_ticks - gap_ticks;
+                e
+            })
+            .collect();
+    }
 
     let replay_duration_s = headers
         .iter()
@@ -177,6 +233,7 @@ pub fn build_analysis(
         server_ticks_total: server_ticks.len() as u32,
         replay_duration_s,
         severity,
+        entity_defs_loaded,
     }
 }
 
@@ -235,13 +292,21 @@ fn detect_spikes(
     thresholds: SpikeThresholds,
 ) -> Vec<Spike> {
     let mut spikes = Vec::new();
-    for window in server_ticks.windows(2) {
+    for (idx, window) in server_ticks.windows(2).enumerate() {
         let prev = window[0];
         let cur = window[1];
         let gap = cur - prev;
         if gap < thresholds.min_gap_s {
             continue;
         }
+
+        // server_ticks is sorted, so ticks sharing the gap-start clock form a
+        // run ending at idx. Counting it backwards gives the burst size.
+        let burst_ticks = server_ticks[..=idx]
+            .iter()
+            .rev()
+            .take_while(|&&t| t == prev)
+            .count() as u32;
 
         let client_packets_in_gap = headers
             .iter()
@@ -267,6 +332,8 @@ fn detect_spikes(
             client_packets_in_gap,
             client_rate_hz,
             client_present_during_gap,
+            burst_ticks,
+            preceding_events: Vec::new(),
         });
     }
     spikes

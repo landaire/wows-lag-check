@@ -1,50 +1,80 @@
-//! Replay helpers that sit on top of the wows-replays parser: realm detection,
-//! the arena-state method-id table, and arena_id extraction. Decryption,
-//! decompression, and packet walking all come from wows-replays itself.
+//! Replay helpers: build/version parsing, realm detection, and unpacking the
+//! entity-def bundle that the JS layer fetches from the wows-replay-data repo.
+
+use std::collections::HashMap;
 
 /// Parse the build number out of `clientVersionFromExe` (e.g. "15,4,0,12506899").
 pub fn build_from_client_version(s: &str) -> Option<u32> {
     s.split(',').nth(3)?.trim().parse().ok()
 }
 
-/// Method_id of `onArenaStateReceived` on the Avatar entity, per WoWs build.
-/// Derived from the game's entity definitions via
-/// `replayshark spec <version> -g <game_dir>` (walk Avatar.def and its
-/// `<Implements>` interfaces, concatenate client methods, sort by sort_size()).
-/// Add a new entry whenever WoWs ships a patch that changes Avatar's method
-/// layout.
-///
-/// Build 12506899 (15.4.0): " - 148: onArenaStateReceived", first arg Int64.
-const ARENA_STATE_METHOD_ID: &[(u32, u32)] = &[
-    (12506899, 148),
-];
-
-/// Look up the `onArenaStateReceived` method_id for a given game build.
-/// Returns None for builds not in the table.
-pub fn arena_state_method_id(build: u32) -> Option<u32> {
-    ARENA_STATE_METHOD_ID
-        .iter()
-        .find_map(|(b, m)| if *b == build { Some(*m) } else { None })
+/// Convert `clientVersionFromExe` ("15,4,0,12506899") into the wows-replay-data
+/// directory name ("15.4.0_12506899").
+pub fn version_dir_name(s: &str) -> Option<String> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    Some(format!("{}.{}.{}_{}", parts[0], parts[1], parts[2], parts[3]))
 }
 
-/// Extract the canonical arenaUniqueId from an EntityMethod packet body, given
-/// the expected `onArenaStateReceived` method_id. Returns None when the body's
-/// method_id doesn't match.
+/// Unpack the entity-def bundle assembled by the JS layer. Format (all
+/// integers little-endian):
+///   [u32 file count]
+///   repeated: [u32 path len][path utf8][u32 content len][content]
+pub fn unpack_def_bundle(bundle: &[u8]) -> Option<HashMap<String, Vec<u8>>> {
+    let mut map = HashMap::new();
+    let mut cur = 0usize;
+    let read_u32 = |b: &[u8], at: usize| -> Option<usize> {
+        b.get(at..at + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()) as usize)
+    };
+
+    let count = read_u32(bundle, cur)?;
+    cur += 4;
+    for _ in 0..count {
+        let path_len = read_u32(bundle, cur)?;
+        cur += 4;
+        let path = std::str::from_utf8(bundle.get(cur..cur + path_len)?).ok()?.to_string();
+        cur += path_len;
+        let content_len = read_u32(bundle, cur)?;
+        cur += 4;
+        let content = bundle.get(cur..cur + content_len)?.to_vec();
+        cur += content_len;
+        map.insert(path, content);
+    }
+    Some(map)
+}
+
+/// Death/kill effects: `Exterior` cosmetics of species `ShipDestruction`. When
+/// a player with one equipped destroys a ship, the effect animates over the
+/// wreck. The param id appears in the equipping ship's `shipConfig.exteriors`.
 ///
-/// EntityMethod body layout (BigWorld):
-///   [0..4]   entity_id
-///   [4..8]   method_id
-///   [8..12]  payload_length
-///   [12..20] arena_id (Int64, first arg of onArenaStateReceived)
-pub fn arena_id_from_packet_body(raw: &[u8], method_id: u32) -> Option<i64> {
-    if raw.len() < 20 {
-        return None;
-    }
-    let m = u32::from_le_bytes(raw[4..8].try_into().unwrap());
-    if m != method_id {
-        return None;
-    }
-    Some(i64::from_le_bytes(raw[12..20].try_into().unwrap()))
+/// Regenerate from a build's GameParams.json with:
+///   jaq -r '.[]|select(.typeinfo.species=="ShipDestruction")|"\(.id) \(.name)"'
+pub fn death_effect_name(param_id: u64) -> Option<&'static str> {
+    Some(match param_id {
+        4293816240 => "Black Friday 2024",
+        4292767664 => "Firework (New Year 2024)",
+        4291719088 => "Red (New Year 2024)",
+        4290670512 => "Blue (New Year 2024)",
+        4289621936 => "April Fools 2025",
+        4288573360 => "Golden Month Red",
+        4287524784 => "Golden Month Silver",
+        4286476208 => "Golden Month Gold",
+        4285427632 => "Cartoon Boom",
+        4283330480 => "CC Program 2025",
+        4282281904 => "Triple Detonation",
+        4281233328 => "Big Water Explosion",
+        4280184752 => "Phosphorus Bombs",
+        4279136176 => "This Is Fine",
+        4278087600 => "Blue Explosion",
+        4277039024 => "Moray Eel (New Year)",
+        4275990448 => "Ice (New Year)",
+        4274941872 => "Northern Light (New Year)",
+        4271796144 => "Good Team",
+        4270747568 => "Bad Team",
+        _ => return None,
+    })
 }
 
 /// Scan the decrypted packet bytes for pickle SHORT_BINSTRING tokens matching

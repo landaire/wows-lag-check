@@ -1,4 +1,10 @@
-import init, { analyzeReplay } from "./pkg/wows_lag_check.js";
+import init, { analyzeReplay, replayInfo } from "./pkg/wows_lag_check.js";
+
+// Per-build game entity definitions, fetched on demand.
+const DATA_REPO = "landaire/wows-replay-data";
+const DATA_API = `https://api.github.com/repos/${DATA_REPO}/contents`;
+const DATA_RAW = `https://raw.githubusercontent.com/${DATA_REPO}/main`;
+const entityDefCache = new Map(); // dirName -> Uint8Array bundle
 
 const dropzone = document.getElementById("dropzone");
 const fileInput = document.getElementById("fileInput");
@@ -171,17 +177,107 @@ async function handleFile(file) {
 
   try {
     await wasmReady;
-    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+
+    const info = replayInfo(bytes);
+    let defsBundle = new Uint8Array(0);
+    if (info.dir_name) {
+      try {
+        setStatus("loading", `Loading entity definitions for build ${info.build}...`);
+        defsBundle = await fetchEntityDefs(info.dir_name);
+      } catch (err) {
+        console.warn("Entity defs unavailable, parsing without them:", err);
+      }
+    }
+
     const t0 = performance.now();
-    const result = analyzeReplay(new Uint8Array(buf));
+    const result = analyzeReplay(bytes, defsBundle);
     const ms = (performance.now() - t0).toFixed(0);
-    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} ping samples, ${result.server_ticks_total} server ticks, ${result.spikes.length} spikes.`);
+    const defsNote = result.entity_defs_loaded ? "" : " (entity defs unavailable)";
+    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} ping samples, ${result.server_ticks_total} server ticks, ${result.spikes.length} spikes.${defsNote}`);
     lastResult = result;
     renderResult(result);
   } catch (err) {
     console.error(err);
     setStatus("error", `Failed to parse: ${err.message ?? err}`);
   }
+}
+
+/// Fetch the entity-def tree for a build from the wows-replay-data repo and
+/// pack it into the bundle format the WASM module expects. Git symlinks (the
+/// repo dedupes def files via a content-addressed vfs_common/ store) are
+/// detected by their `../` content and resolved to the real blob.
+async function fetchEntityDefs(dirName) {
+  if (entityDefCache.has(dirName)) {
+    return entityDefCache.get(dirName);
+  }
+
+  const scriptsDir = `${dirName}/vfs/scripts`;
+  const dirs = [scriptsDir, `${scriptsDir}/entity_defs`, `${scriptsDir}/entity_defs/interfaces`];
+
+  const entries = [];
+  for (const dir of dirs) {
+    const resp = await fetch(`${DATA_API}/${dir}?ref=main`);
+    if (!resp.ok) throw new Error(`list ${dir}: HTTP ${resp.status}`);
+    for (const e of await resp.json()) {
+      if (e.type !== "dir") entries.push({ dir, name: e.name, path: e.path });
+    }
+  }
+
+  const prefix = `${dirName}/vfs/`;
+  const files = await Promise.all(
+    entries.map(async (e) => {
+      let content = await fetchBytes(`${DATA_RAW}/${e.path}`);
+      // A git symlink reads back as its target path (e.g. ../../../vfs_common/ab/...).
+      const asText = new TextDecoder().decode(content.subarray(0, 3));
+      if (asText.startsWith("../")) {
+        const target = new TextDecoder().decode(content).trim();
+        content = await fetchBytes(`${DATA_RAW}/${resolveRepoPath(e.dir, target)}`);
+      }
+      return { key: e.path.slice(prefix.length), content };
+    })
+  );
+
+  const bundle = packBundle(files);
+  entityDefCache.set(dirName, bundle);
+  return bundle;
+}
+
+async function fetchBytes(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`fetch ${url}: HTTP ${resp.status}`);
+  return new Uint8Array(await resp.arrayBuffer());
+}
+
+/// Resolve a relative path (a symlink target) against a repo directory,
+/// returning a repo-root-relative path.
+function resolveRepoPath(baseDir, rel) {
+  const parts = baseDir.split("/").filter(Boolean);
+  for (const seg of rel.split("/")) {
+    if (seg === "..") parts.pop();
+    else if (seg !== "." && seg !== "") parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+/// Pack [{key, content}] into [u32 count]([u32 keyLen][key][u32 contentLen][content])*
+function packBundle(files) {
+  const enc = new TextEncoder();
+  const parts = files.map((f) => ({ key: enc.encode(f.key), content: f.content }));
+  let size = 4;
+  for (const p of parts) size += 8 + p.key.length + p.content.length;
+
+  const out = new Uint8Array(size);
+  const view = new DataView(out.buffer);
+  let off = 0;
+  view.setUint32(off, parts.length, true); off += 4;
+  for (const p of parts) {
+    view.setUint32(off, p.key.length, true); off += 4;
+    out.set(p.key, off); off += p.key.length;
+    view.setUint32(off, p.content.length, true); off += 4;
+    out.set(p.content, off); off += p.content.length;
+  }
+  return out;
 }
 
 function fmtClock(seconds) {
@@ -217,11 +313,12 @@ function renderResult(r) {
     spikeRows.innerHTML = `<tr><td colspan="6" class="py-3 text-slate-500">No gaps over 500 ms detected.</td></tr>`;
     spikesNote.textContent = "";
   } else {
+    const KIND_DOT = { kill: "bg-rose-400", consumable: "bg-sky-400", spotted: "bg-amber-400" };
     spikeRows.innerHTML = r.spikes.map((s) => {
       const stall = s.client_present_during_gap
         ? `<span class="inline-flex items-center gap-1.5"><span class="size-2 rounded-full bg-orange-400"></span>server-only</span>`
         : `<span class="inline-flex items-center gap-1.5"><span class="size-2 rounded-full bg-violet-400"></span>client+server</span>`;
-      return `<tr class="hover:bg-slate-800/50">
+      const row = `<tr class="hover:bg-slate-800/50 border-t border-slate-800">
         <td class="py-2 pr-3 font-mono text-slate-300">${fmtClock(s.gap_start_clock)}</td>
         <td class="py-2 pr-3 font-mono text-slate-300">${fmtBattleClock(s.gap_start_clock, r.battle_start_clock_approx_s)}</td>
         <td class="py-2 pr-3 text-right font-mono ${s.gap_seconds > 2 ? "text-rose-300 font-semibold" : "text-slate-200"}">${(s.gap_seconds * 1000).toFixed(0)} ms</td>
@@ -229,6 +326,33 @@ function renderResult(r) {
         <td class="py-2 pr-3">${stall}</td>
         <td class="py-2 pr-3 text-right font-mono text-slate-400">${s.client_rate_hz.toFixed(1)} Hz</td>
       </tr>`;
+      const events = (s.preceding_events ?? []);
+      const hasBurst = s.burst_ticks > 1;
+      if (events.length === 0 && !hasBurst) return row;
+      const items = events.map((e) => {
+        const dt = (s.gap_start_clock - e.clock).toFixed(2);
+        const dot = KIND_DOT[e.kind] ?? "bg-slate-400";
+        // entity_id / ship_param_id are numbers, safe to inline as-is.
+        let ids = "";
+        if (e.entity_id != null) ids += ` entity ${e.entity_id}`;
+        if (e.ship_param_id != null) ids += ` ship ${e.ship_param_id}`;
+        const idSpan = ids ? `<span class="text-slate-600 font-mono">${ids}</span>` : "";
+        return `<div class="flex gap-2 items-baseline">`
+          + `<span class="text-slate-500 font-mono shrink-0">-${dt}s (${e.tick_offset} ticks)</span>`
+          + `<span class="inline-flex items-baseline gap-1.5 flex-wrap">`
+          + `<span class="size-1.5 rounded-full ${dot}"></span>${escapeHtml(e.text)}${idSpan}</span></div>`;
+      }).join("");
+      // s.burst_ticks is a number, safe to inline.
+      const burstNote = hasBurst
+        ? `<div class="text-orange-300/90">Server stutter: ${s.burst_ticks} server ticks stamped the same clock before the freeze</div>`
+        : "";
+      const eventsBlock = events.length
+        ? `<div class="text-slate-500 uppercase tracking-wider text-[10px]">in the 2s before</div>${items}`
+        : "";
+      const eventRow = `<tr class="bg-slate-900/60"><td colspan="6" class="pb-2 pl-4 pr-3">`
+        + `<div class="text-xs text-slate-400 space-y-0.5">${burstNote}${eventsBlock}</div>`
+        + `</td></tr>`;
+      return row + eventRow;
     }).join("");
     spikesNote.textContent = `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= 500 ms`;
   }
@@ -249,21 +373,36 @@ function renderResult(r) {
     ["Replay duration", `${r.replay_duration_s.toFixed(1)}s`],
     ["Arena ID",        m.arena_id
       ? `${m.arena_id} (0x${m.arena_id_hex})`
-      : `(unavailable; no entity-def entry for build ${m.client_build ?? "?"})`],
+      : r.entity_defs_loaded
+        ? "(not found)"
+        : `(needs entity defs for build ${m.client_build ?? "?"})`],
   ];
-  metaList.innerHTML = metaRows.map(([k, v]) =>
-    `<dt class="text-slate-500">${k}</dt><dd class="text-slate-200 font-mono break-all">${escapeHtml(v)}</dd>`
-  ).join("");
+  // metaRows hold replay-controlled strings (player name, map, etc.); build
+  // the nodes with textContent so markup in those values can never execute.
+  renderDefList(metaList, metaRows, "text-slate-200 font-mono break-all");
 
   const ps = r.ping_stats;
-  pingStats.innerHTML = [
+  renderDefList(pingStats, [
     ["min",  `${ps.min_ms} ms`],
     ["mean", `${ps.mean_ms.toFixed(1)} ms`],
     ["p95",  `${ps.p95_ms} ms`],
     ["max",  `${ps.max_ms} ms`],
-  ].map(([k, v]) =>
-    `<dt class="text-slate-500">${k}</dt><dd class="text-slate-200 font-medium">${v}</dd>`
-  ).join("");
+  ], "text-slate-200 font-medium");
+}
+
+/// Render `[key, value]` pairs into a <dl> as <dt>/<dd> nodes. Uses
+/// textContent, so values are never interpreted as HTML.
+function renderDefList(dl, rows, ddClass) {
+  dl.replaceChildren();
+  for (const [k, v] of rows) {
+    const dt = document.createElement("dt");
+    dt.className = "text-slate-500";
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.className = ddClass;
+    dd.textContent = v;
+    dl.append(dt, dd);
+  }
 }
 
 function buildDiscordSummary(r) {
@@ -296,6 +435,13 @@ ${arenaLine}
       const peak = `${s.peak_ping_ms}ms`.padStart(5);
       const type = s.client_present_during_gap ? "server-only" : "client+server";
       body += `${bt.padEnd(6)}  ${gap}  ${peak}  ${type}\n`;
+      if (s.burst_ticks > 1) {
+        body += `        burst: ${s.burst_ticks} server ticks stamped one clock\n`;
+      }
+      for (const e of (s.preceding_events ?? [])) {
+        const eid = e.entity_id != null ? ` [entity ${e.entity_id}]` : "";
+        body += `        -${(s.gap_start_clock - e.clock).toFixed(2)}s (${e.tick_offset} ticks)  ${e.text}${eid}\n`;
+      }
     }
     body += `\`\`\`\n`;
   }

@@ -962,6 +962,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "wasm-bindgen",
  "wows_replays",
+ "wowsunpack",
 ]
 
 [[package]]
