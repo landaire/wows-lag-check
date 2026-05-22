@@ -4,3 +4,14 @@
   --color-server: oklch(0.74 0.18 35);
   --color-client: oklch(0.78 0.15 290);
 }
+
+/* Player-name chips in event lines, and the hover link to their ship row. */
+.evt-name {
+  border-radius: 0.2rem;
+  padding: 0 0.2rem;
+  cursor: default;
+  transition: background-color 0.1s ease;
+}
+.eid-hl {
+  background-color: rgb(56 189 248 / 0.18);
+}

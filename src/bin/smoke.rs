@@ -2,7 +2,8 @@
 //
 // <build-dir> is an optional wows-replay-data build directory (e.g.
 // G:\wows_builds\15.4.0_12506899). When given, entity defs are loaded from its
-// vfs/scripts/ tree and the replay is parsed through the full parser.
+// vfs/scripts/ tree, game_params.rkyv and translations/en/.../global.mo are
+// loaded for ship/camo names, and the replay is parsed through the full parser.
 
 use std::fs;
 use std::path::Path;
@@ -14,17 +15,19 @@ fn main() {
     let build_dir = args.next();
 
     let bytes = fs::read(&replay_path).expect("read replay");
-    let defs_bundle = build_dir
+    let data = build_dir
         .as_deref()
-        .map(|d| bundle_entity_defs(Path::new(d)))
+        .map(|d| BuildData::load(Path::new(d)))
         .unwrap_or_default();
 
-    let result = run_analysis(&bytes, &defs_bundle).expect("analysis");
+    let result = run_analysis(&bytes, &data.defs_bundle, &data.game_params, &data.translations)
+        .expect("analysis");
 
     println!("=== {} ({}) ===", result.meta.player_vehicle, result.meta.player_name);
     println!("Map: {}  Mode: {}", result.meta.map_display_name, result.meta.game_type);
     println!("Client: {}", result.meta.client_version);
     println!("Entity defs loaded: {}", result.entity_defs_loaded);
+    println!("Game params loaded: {}", result.game_params_loaded);
     match (&result.meta.arena_id, &result.meta.arena_id_hex) {
         (Some(d), Some(h)) => println!("Arena ID: {d} (0x{h})"),
         _ => println!("Arena ID: (not found)"),
@@ -55,21 +58,53 @@ fn main() {
             burst,
         );
         for ev in &s.preceding_events {
-            let mut detail = String::new();
-            if let Some(eid) = ev.entity_id {
-                detail.push_str(&format!("  entity {eid}"));
-            }
-            if let Some(sid) = ev.ship_param_id {
-                detail.push_str(&format!("  ship {sid}"));
-            }
+            let players: Vec<&str> = ev.ships.iter().map(|sh| sh.player.as_str()).collect();
+            let effect = ev.death_effect.as_deref().map(|e| format!(" [{e}]")).unwrap_or_default();
             println!(
-                "        -{:.2}s ({} ticks)  [{}] {}{}",
+                "        -{:.2}s ({} ticks)  [{}] {} {}{}",
                 s.gap_start_clock - ev.clock,
                 ev.tick_offset,
                 ev.kind,
-                ev.text,
-                detail,
+                players.join(" / "),
+                ev.detail,
+                effect,
             );
+            for sh in &ev.ships {
+                println!(
+                    "              {} | entity {} | ship {} | {} | camo {}",
+                    sh.player,
+                    sh.entity_id,
+                    sh.ship_param_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                    sh.ship_name.as_deref().unwrap_or("-"),
+                    sh.camo.as_deref().unwrap_or("-"),
+                );
+            }
+        }
+    }
+}
+
+/// Per-build inputs loaded from a wows-replay-data build directory.
+#[derive(Default)]
+struct BuildData {
+    defs_bundle: Vec<u8>,
+    game_params: Vec<u8>,
+    translations: Vec<u8>,
+}
+
+impl BuildData {
+    fn load(dir: &Path) -> BuildData {
+        // Prefer the zstd blobs (what the web client uses); fall back to raw.
+        let game_params = fs::read(dir.join("game_params.rkyv.zst"))
+            .or_else(|_| fs::read(dir.join("game_params.rkyv")))
+            .unwrap_or_default();
+        let mo = dir.join("translations/en/LC_MESSAGES");
+        let translations = fs::read(mo.join("global.mo.zst"))
+            .or_else(|_| fs::read(mo.join("global.mo")))
+            .unwrap_or_default();
+        BuildData {
+            defs_bundle: bundle_entity_defs(dir),
+            game_params,
+            translations,
         }
     }
 }

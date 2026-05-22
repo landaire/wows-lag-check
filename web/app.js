@@ -1,10 +1,12 @@
 import init, { analyzeReplay, replayInfo } from "./pkg/wows_lag_check.js";
+import { html, render } from "./vendor/lit-html.js";
 
 // Per-build game entity definitions, fetched on demand.
 const DATA_REPO = "landaire/wows-replay-data";
 const DATA_API = `https://api.github.com/repos/${DATA_REPO}/contents`;
 const DATA_RAW = `https://raw.githubusercontent.com/${DATA_REPO}/main`;
 const entityDefCache = new Map(); // dirName -> Uint8Array bundle
+const gameDataCache = new Map(); // dirName -> { gameParams, translations }
 
 const dropzone = document.getElementById("dropzone");
 const fileInput = document.getElementById("fileInput");
@@ -16,6 +18,8 @@ const pingStats = document.getElementById("pingStats");
 const chartWrap = document.getElementById("chartWrap");
 const spikeRows = document.getElementById("spikeRows");
 const spikesNote = document.getElementById("spikesNote");
+const spikesCard = document.getElementById("spikesCard");
+const spikeShips = document.getElementById("spikeShips");
 const severityCard = document.getElementById("severityCard");
 const severityDot = document.getElementById("severityDot");
 const severityLabel = document.getElementById("severityLabel");
@@ -38,14 +42,63 @@ const SEVERITY_STYLE = {
   severe:   { dot: "bg-rose-500",     card: "border-rose-700    bg-rose-950/50",     label: "Severe",   sub: "Match-affecting stall(s)" },
 };
 
+const KIND_DOT = { kill: "bg-rose-400", consumable: "bg-sky-400", spotted: "bg-amber-400" };
+
+// Hover linking: highlight every element sharing the hovered element's data-eid
+// within the Spikes card, so a player name in any spike event and that player's
+// row in the players table light up together. Delegated once; survives
+// lit-html re-renders.
+spikesCard.addEventListener("mouseover", (ev) => {
+  const el = ev.target.closest("[data-eid]");
+  if (!el) return;
+  for (const n of spikesCard.querySelectorAll(`[data-eid="${el.dataset.eid}"]`)) {
+    n.classList.add("eid-hl");
+  }
+});
+spikesCard.addEventListener("mouseout", (ev) => {
+  if (!ev.target.closest("[data-eid]")) return;
+  for (const n of spikesCard.querySelectorAll(".eid-hl")) {
+    n.classList.remove("eid-hl");
+  }
+});
+
+/// Render a finished state in the status box: a check or warning icon plus
+/// a message. `kind` is "ok" or "error".
 function setStatus(kind, msg) {
   statusSection.classList.remove("hidden");
-  statusBox.textContent = msg;
-  statusBox.className = "rounded-lg px-4 py-3 text-sm " + (
-    kind === "error"   ? "bg-rose-950 text-rose-200 border border-rose-900" :
-    kind === "loading" ? "bg-sky-950 text-sky-200 border border-sky-900" :
-                         "bg-emerald-950 text-emerald-200 border border-emerald-900"
+  const ok = kind !== "error";
+  statusBox.className = "rounded-lg px-4 py-3 text-sm border flex items-center gap-2.5 " + (
+    ok ? "bg-emerald-950 text-emerald-200 border-emerald-900"
+       : "bg-rose-950 text-rose-200 border-rose-900"
   );
+  render(html`
+    <i class="ph ${ok ? "ph-check-circle text-emerald-400" : "ph-warning-circle text-rose-400"} text-xl shrink-0"></i>
+    <span>${msg}</span>
+  `, statusBox);
+}
+
+/// Render an in-progress step in the status box: a spinning icon, a friendly
+/// title, the file/path detail, and a progress bar when `percent` is a number
+/// (pass null for an indeterminate step).
+function showLoading(title, detail, percent) {
+  statusSection.classList.remove("hidden");
+  statusBox.className = "rounded-lg px-4 py-3 text-sm border bg-sky-950 text-sky-200 border-sky-900";
+  render(html`
+    <div class="flex items-center gap-2.5">
+      <i class="ph ph-circle-notch text-xl text-sky-400 inline-block animate-spin shrink-0"></i>
+      <span class="font-medium">${title}</span>
+    </div>
+    ${detail
+      ? html`<p class="mt-1.5 ml-7 text-xs text-sky-400/70 font-mono break-all">${detail}</p>`
+      : ""}
+    ${percent != null
+      ? html`
+        <div class="mt-2 ml-7 h-1.5 rounded-full bg-sky-900 overflow-hidden">
+          <div class="h-full rounded-full bg-sky-400 transition-all duration-150 ease-out"
+            style="width:${Math.max(0, Math.min(100, percent))}%"></div>
+        </div>`
+      : ""}
+  `, statusBox);
 }
 
 dropzone.addEventListener("click", () => fileInput.click());
@@ -172,7 +225,7 @@ async function handleFile(file) {
     setStatus("error", `"${file.name}" doesn't look like a .wowsreplay file.`);
     return;
   }
-  setStatus("loading", `Parsing ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`);
+  showLoading("Reading your replay…", file.name, null);
   resultSection.classList.add("hidden");
 
   try {
@@ -181,20 +234,48 @@ async function handleFile(file) {
 
     const info = replayInfo(bytes);
     let defsBundle = new Uint8Array(0);
+    let gameParams = new Uint8Array(0);
+    let translations = new Uint8Array(0);
     if (info.dir_name) {
       try {
-        setStatus("loading", `Loading entity definitions for build ${info.build}...`);
-        defsBundle = await fetchEntityDefs(info.dir_name);
+        defsBundle = await fetchEntityDefs(info.dir_name, (done, total) => {
+          showLoading(
+            "Hauling in game data…",
+            total ? `${info.dir_name} — ship definitions, file ${done} of ${total}`
+                  : `${info.dir_name} — listing ship definitions…`,
+            total ? (done / total) * 100 : null,
+          );
+        });
       } catch (err) {
         console.warn("Entity defs unavailable, parsing without them:", err);
       }
+      try {
+        const gd = await fetchGameData(info.dir_name, (path, loaded, total) => {
+          const mb = (loaded / 1024 / 1024).toFixed(1);
+          showLoading(
+            "Hauling in game data…",
+            `${path}  (${mb} MB)`,
+            total ? (loaded / total) * 100 : null,
+          );
+        });
+        gameParams = gd.gameParams;
+        translations = gd.translations;
+      } catch (err) {
+        console.warn("Game params unavailable, ship names disabled:", err);
+      }
     }
 
+    showLoading("Hunting for lag spikes…", "Crunching the replay — this can take a few seconds.", null);
+    // Let the browser paint the spinner before the synchronous WASM call.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
     const t0 = performance.now();
-    const result = analyzeReplay(bytes, defsBundle);
+    const result = analyzeReplay(bytes, defsBundle, gameParams, translations);
     const ms = (performance.now() - t0).toFixed(0);
-    const defsNote = result.entity_defs_loaded ? "" : " (entity defs unavailable)";
-    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} ping samples, ${result.server_ticks_total} server ticks, ${result.spikes.length} spikes.${defsNote}`);
+    let dataNote = "";
+    if (!result.entity_defs_loaded) dataNote = " (entity defs unavailable)";
+    else if (!result.game_params_loaded) dataNote = " (ship names unavailable)";
+    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} ping samples, ${result.server_ticks_total} server ticks, ${result.spikes.length} spikes.${dataNote}`);
     lastResult = result;
     renderResult(result);
   } catch (err) {
@@ -207,7 +288,7 @@ async function handleFile(file) {
 /// pack it into the bundle format the WASM module expects. Git symlinks (the
 /// repo dedupes def files via a content-addressed vfs_common/ store) are
 /// detected by their `../` content and resolved to the real blob.
-async function fetchEntityDefs(dirName) {
+async function fetchEntityDefs(dirName, onProgress) {
   if (entityDefCache.has(dirName)) {
     return entityDefCache.get(dirName);
   }
@@ -217,6 +298,7 @@ async function fetchEntityDefs(dirName) {
 
   const entries = [];
   for (const dir of dirs) {
+    onProgress?.(0, 0);
     const resp = await fetch(`${DATA_API}/${dir}?ref=main`);
     if (!resp.ok) throw new Error(`list ${dir}: HTTP ${resp.status}`);
     for (const e of await resp.json()) {
@@ -225,15 +307,14 @@ async function fetchEntityDefs(dirName) {
   }
 
   const prefix = `${dirName}/vfs/`;
+  let done = 0;
+  const total = entries.length;
+  onProgress?.(0, total);
   const files = await Promise.all(
     entries.map(async (e) => {
-      let content = await fetchBytes(`${DATA_RAW}/${e.path}`);
-      // A git symlink reads back as its target path (e.g. ../../../vfs_common/ab/...).
-      const asText = new TextDecoder().decode(content.subarray(0, 3));
-      if (asText.startsWith("../")) {
-        const target = new TextDecoder().decode(content).trim();
-        content = await fetchBytes(`${DATA_RAW}/${resolveRepoPath(e.dir, target)}`);
-      }
+      const content = await fetchRepoFile(e.path);
+      done += 1;
+      onProgress?.(done, total);
       return { key: e.path.slice(prefix.length), content };
     })
   );
@@ -243,10 +324,67 @@ async function fetchEntityDefs(dirName) {
   return bundle;
 }
 
-async function fetchBytes(url) {
+/// Fetch the GameParams blob and English translation catalog for a build.
+/// These resolve ship and camouflage display names. Both are zstd-compressed
+/// (~1.3 MB blob, ~1.5 MB catalog); the WASM module inflates them. The browser
+/// caches them by ETag, so repeat loads revalidate cheaply.
+async function fetchGameData(dirName, onProgress) {
+  if (gameDataCache.has(dirName)) {
+    return gameDataCache.get(dirName);
+  }
+  // Fetched sequentially so the progress bar tracks one file at a time.
+  const gpPath = `${dirName}/game_params.rkyv.zst`;
+  const moPath = `${dirName}/translations/en/LC_MESSAGES/global.mo.zst`;
+  const gameParams = await fetchRepoFile(gpPath,
+    (loaded, total) => onProgress?.(gpPath, loaded, total));
+  const translations = await fetchRepoFile(moPath,
+    (loaded, total) => onProgress?.(moPath, loaded, total));
+  const data = { gameParams, translations };
+  gameDataCache.set(dirName, data);
+  return data;
+}
+
+/// Fetch a URL into a Uint8Array. With an `onProgress(loaded, total)` callback
+/// the body is streamed so download progress can be reported; without one it
+/// takes the simple buffered path.
+async function fetchBytes(url, onProgress) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`fetch ${url}: HTTP ${resp.status}`);
-  return new Uint8Array(await resp.arrayBuffer());
+  if (!onProgress || !resp.body) {
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+  const total = Number(resp.headers.get("content-length")) || 0;
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    onProgress(loaded, total);
+  }
+  const out = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/// Fetch a repo file, transparently resolving a git symlink. The repo
+/// deduplicates files into a content-addressed vfs_common/ store, so most
+/// files are symlinks; raw.githubusercontent.com serves a symlink as a short
+/// text blob holding its `../`-relative target path.
+async function fetchRepoFile(repoPath, onProgress) {
+  const content = await fetchBytes(`${DATA_RAW}/${repoPath}`);
+  if (new TextDecoder().decode(content.subarray(0, 3)) !== "../") {
+    return content;
+  }
+  const dir = repoPath.slice(0, repoPath.lastIndexOf("/"));
+  const target = new TextDecoder().decode(content).trim();
+  return fetchBytes(`${DATA_RAW}/${resolveRepoPath(dir, target)}`, onProgress);
 }
 
 /// Resolve a relative path (a symlink target) against a repo directory,
@@ -309,53 +447,20 @@ function renderResult(r) {
   severitySub.textContent = style.sub;
   severityHeadline.textContent = sev.headline;
 
-  if (r.spikes.length === 0) {
-    spikeRows.innerHTML = `<tr><td colspan="6" class="py-3 text-slate-500">No gaps over 500 ms detected.</td></tr>`;
-    spikesNote.textContent = "";
-  } else {
-    const KIND_DOT = { kill: "bg-rose-400", consumable: "bg-sky-400", spotted: "bg-amber-400" };
-    spikeRows.innerHTML = r.spikes.map((s) => {
-      const stall = s.client_present_during_gap
-        ? `<span class="inline-flex items-center gap-1.5"><span class="size-2 rounded-full bg-orange-400"></span>server-only</span>`
-        : `<span class="inline-flex items-center gap-1.5"><span class="size-2 rounded-full bg-violet-400"></span>client+server</span>`;
-      const row = `<tr class="hover:bg-slate-800/50 border-t border-slate-800">
-        <td class="py-2 pr-3 font-mono text-slate-300">${fmtClock(s.gap_start_clock)}</td>
-        <td class="py-2 pr-3 font-mono text-slate-300">${fmtBattleClock(s.gap_start_clock, r.battle_start_clock_approx_s)}</td>
-        <td class="py-2 pr-3 text-right font-mono ${s.gap_seconds > 2 ? "text-rose-300 font-semibold" : "text-slate-200"}">${(s.gap_seconds * 1000).toFixed(0)} ms</td>
-        <td class="py-2 pr-3 text-right font-mono text-slate-200">${s.peak_ping_ms} ms</td>
-        <td class="py-2 pr-3">${stall}</td>
-        <td class="py-2 pr-3 text-right font-mono text-slate-400">${s.client_rate_hz.toFixed(1)} Hz</td>
-      </tr>`;
-      const events = (s.preceding_events ?? []);
-      const hasBurst = s.burst_ticks > 1;
-      if (events.length === 0 && !hasBurst) return row;
-      const items = events.map((e) => {
-        const dt = (s.gap_start_clock - e.clock).toFixed(2);
-        const dot = KIND_DOT[e.kind] ?? "bg-slate-400";
-        // entity_id / ship_param_id are numbers, safe to inline as-is.
-        let ids = "";
-        if (e.entity_id != null) ids += ` entity ${e.entity_id}`;
-        if (e.ship_param_id != null) ids += ` ship ${e.ship_param_id}`;
-        const idSpan = ids ? `<span class="text-slate-600 font-mono">${ids}</span>` : "";
-        return `<div class="flex gap-2 items-baseline">`
-          + `<span class="text-slate-500 font-mono shrink-0">-${dt}s (${e.tick_offset} ticks)</span>`
-          + `<span class="inline-flex items-baseline gap-1.5 flex-wrap">`
-          + `<span class="size-1.5 rounded-full ${dot}"></span>${escapeHtml(e.text)}${idSpan}</span></div>`;
-      }).join("");
-      // s.burst_ticks is a number, safe to inline.
-      const burstNote = hasBurst
-        ? `<div class="text-orange-300/90">Server stutter: ${s.burst_ticks} server ticks stamped the same clock before the freeze</div>`
-        : "";
-      const eventsBlock = events.length
-        ? `<div class="text-slate-500 uppercase tracking-wider text-[10px]">in the 2s before</div>${items}`
-        : "";
-      const eventRow = `<tr class="bg-slate-900/60"><td colspan="6" class="pb-2 pl-4 pr-3">`
-        + `<div class="text-xs text-slate-400 space-y-0.5">${burstNote}${eventsBlock}</div>`
-        + `</td></tr>`;
-      return row + eventRow;
-    }).join("");
-    spikesNote.textContent = `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= 500 ms`;
-  }
+  render(spikeRowsTemplate(r), spikeRows);
+  spikesNote.textContent = r.spikes.length
+    ? `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= 500 ms`
+    : "";
+
+  // One players table for the whole section, so ships aren't repeated per spike.
+  const allShips = involvedShips(r.spikes.flatMap((s) => s.preceding_events ?? []));
+  spikeShips.classList.toggle("hidden", allShips.length === 0);
+  render(
+    allShips.length
+      ? html`<div class="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Players involved</div>${shipsTable(allShips)}`
+      : "",
+    spikeShips,
+  );
 
   renderChart(r);
 
@@ -377,32 +482,146 @@ function renderResult(r) {
         ? "(not found)"
         : `(needs entity defs for build ${m.client_build ?? "?"})`],
   ];
-  // metaRows hold replay-controlled strings (player name, map, etc.); build
-  // the nodes with textContent so markup in those values can never execute.
-  renderDefList(metaList, metaRows, "text-slate-200 font-mono break-all");
+  render(defList(metaRows, "text-slate-200 font-mono break-all"), metaList);
 
   const ps = r.ping_stats;
-  renderDefList(pingStats, [
+  render(defList([
     ["min",  `${ps.min_ms} ms`],
     ["mean", `${ps.mean_ms.toFixed(1)} ms`],
     ["p95",  `${ps.p95_ms} ms`],
     ["max",  `${ps.max_ms} ms`],
-  ], "text-slate-200 font-medium");
+  ], "text-slate-200 font-medium"), pingStats);
 }
 
-/// Render `[key, value]` pairs into a <dl> as <dt>/<dd> nodes. Uses
-/// textContent, so values are never interpreted as HTML.
-function renderDefList(dl, rows, ddClass) {
-  dl.replaceChildren();
-  for (const [k, v] of rows) {
-    const dt = document.createElement("dt");
-    dt.className = "text-slate-500";
-    dt.textContent = k;
-    const dd = document.createElement("dd");
-    dd.className = ddClass;
-    dd.textContent = v;
-    dl.append(dt, dd);
+/// The spike table body: one row per spike, plus an expandable detail row for
+/// spikes that have a stutter burst or preceding events.
+function spikeRowsTemplate(r) {
+  if (r.spikes.length === 0) {
+    return html`<tr><td colspan="6" class="py-3 text-slate-500">No gaps over 500 ms detected.</td></tr>`;
   }
+  return r.spikes.map((s) => spikeRow(s, r));
+}
+
+function spikeRow(s, r) {
+  const stallColor = s.client_present_during_gap ? "bg-orange-400" : "bg-violet-400";
+  const stallLabel = s.client_present_during_gap ? "server-only" : "client+server";
+  const gapClass = s.gap_seconds > 2 ? "text-rose-300 font-semibold" : "text-slate-200";
+  const mainRow = html`
+    <tr class="hover:bg-slate-800/50 border-t border-slate-800">
+      <td class="py-2 pr-3 font-mono text-slate-300">${fmtClock(s.gap_start_clock)}</td>
+      <td class="py-2 pr-3 font-mono text-slate-300">${fmtBattleClock(s.gap_start_clock, r.battle_start_clock_approx_s)}</td>
+      <td class="py-2 pr-3 text-right font-mono ${gapClass}">${(s.gap_seconds * 1000).toFixed(0)} ms</td>
+      <td class="py-2 pr-3 text-right font-mono text-slate-200">${s.peak_ping_ms} ms</td>
+      <td class="py-2 pr-3">
+        <span class="inline-flex items-center gap-1.5">
+          <span class="size-2 rounded-full ${stallColor}"></span>${stallLabel}
+        </span>
+      </td>
+      <td class="py-2 pr-3 text-right font-mono text-slate-400">${s.client_rate_hz.toFixed(1)} Hz</td>
+    </tr>`;
+
+  const events = s.preceding_events ?? [];
+  const hasBurst = s.burst_ticks > 1;
+  if (events.length === 0 && !hasBurst) return mainRow;
+
+  return html`${mainRow}
+    <tr class="bg-slate-900/60">
+      <td colspan="6" class="pb-2 pl-4 pr-3">
+        <div class="text-xs text-slate-400 space-y-0.5">
+          ${hasBurst
+            ? html`<div class="text-orange-300/90">Server stutter: ${s.burst_ticks} server ticks stamped the same clock before the freeze</div>`
+            : ""}
+          ${events.length
+            ? html`<div class="text-slate-500 uppercase tracking-wider text-[10px]">in the 2s before</div>`
+            : ""}
+          ${events.map((e) => eventLine(s, e))}
+        </div>
+      </td>
+    </tr>`;
+}
+
+/// Decompose an event into ordered parts: plain text and ship references.
+/// The UI renders ship parts as hover chips; Discord renders them as plain
+/// player names. The display sentence lives here, in one place.
+function composeEvent(e) {
+  const ships = e.ships ?? [];
+  const t = (v) => ({ t: "text", v });
+  const sh = (i) => ({ t: "ship", v: ships[i] });
+  if (e.kind === "spotted") return [t("Spotted "), sh(0)];
+  if (e.kind === "consumable") return [sh(0), t(` used ${e.detail}`)];
+  if (e.kind === "kill") {
+    const eff = e.death_effect ? `; death effect: ${e.death_effect}` : "";
+    return [sh(0), t(" destroyed by "), sh(1), t(` (${e.detail})${eff}`)];
+  }
+  return [t(e.kind)];
+}
+
+/// One preceding-event line: time/tick offset, a kind-colored dot, and the
+/// event sentence with player names only — ids, ships, and camo move to the
+/// ship table below. Each player name is a chip linked to its table row.
+function eventLine(s, e) {
+  const dt = (s.gap_start_clock - e.clock).toFixed(2);
+  const dot = KIND_DOT[e.kind] ?? "bg-slate-400";
+  const parts = composeEvent(e).map((p) =>
+    p.t === "ship"
+      ? html`<span class="evt-name" data-eid=${p.v.entity_id}>${p.v.player}</span>`
+      : p.v
+  );
+  return html`
+    <div class="flex gap-2 items-baseline">
+      <span class="text-slate-500 font-mono shrink-0">-${dt}s (${e.tick_offset} ticks)</span>
+      <span class="inline-flex items-baseline gap-1.5 flex-wrap">
+        <span class="size-1.5 rounded-full ${dot}"></span>
+        <span>${parts}</span>
+      </span>
+    </div>`;
+}
+
+/// Distinct ships referenced by a list of events, in first-seen order.
+function involvedShips(events) {
+  const seen = new Map();
+  for (const e of events) {
+    for (const ship of (e.ships ?? [])) {
+      if (!seen.has(ship.entity_id)) seen.set(ship.entity_id, ship);
+    }
+  }
+  return [...seen.values()];
+}
+
+/// A compact ship table: each row carries data-eid so hovering a player name
+/// in an event line highlights the matching row (and vice versa).
+function shipsTable(ships) {
+  return html`
+    <table class="w-full text-[11px] border-separate border-spacing-0">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px] text-left">
+          <th class="font-medium pr-3 pb-1">Player</th>
+          <th class="font-medium pr-3 pb-1">Ship</th>
+          <th class="font-medium pr-3 pb-1">Camo</th>
+          <th class="font-medium pr-3 pb-1 text-right">Entity</th>
+          <th class="font-medium pb-1 text-right">Ship ID</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${ships.map((sh) => html`
+          <tr data-eid=${sh.entity_id}>
+            <td class="pr-3 py-0.5 text-slate-300">${sh.player}</td>
+            <td class="pr-3 py-0.5 text-slate-300">${sh.ship_name ?? "-"}</td>
+            <td class="pr-3 py-0.5 text-slate-400">${sh.camo ?? "-"}</td>
+            <td class="pr-3 py-0.5 text-right font-mono text-slate-500">${sh.entity_id}</td>
+            <td class="py-0.5 text-right font-mono text-slate-500">${sh.ship_param_id ?? "-"}</td>
+          </tr>`)}
+      </tbody>
+    </table>`;
+}
+
+/// `[key, value]` pairs as <dt>/<dd> nodes. lit-html escapes the interpolated
+/// values, so replay-controlled strings can never be interpreted as markup.
+function defList(rows, ddClass) {
+  return rows.map(([k, v]) => html`
+    <dt class="text-slate-500">${k}</dt>
+    <dd class="${ddClass}">${v}</dd>
+  `);
 }
 
 function buildDiscordSummary(r) {
@@ -439,14 +658,36 @@ ${arenaLine}
         body += `        burst: ${s.burst_ticks} server ticks stamped one clock\n`;
       }
       for (const e of (s.preceding_events ?? [])) {
-        const eid = e.entity_id != null ? ` [entity ${e.entity_id}]` : "";
-        body += `        -${(s.gap_start_clock - e.clock).toFixed(2)}s (${e.tick_offset} ticks)  ${e.text}${eid}\n`;
+        const line = composeEvent(e).map((p) => (p.t === "ship" ? p.v.player : p.v)).join("");
+        body += `        -${(s.gap_start_clock - e.clock).toFixed(2)}s (${e.tick_offset} ticks)  ${line}\n`;
       }
     }
     body += `\`\`\`\n`;
+
+    const ships = involvedShips(r.spikes.flatMap((s) => s.preceding_events ?? []));
+    if (ships.length > 0) {
+      body += `\n**Ships**\n${shipTableText(ships)}`;
+    }
   }
 
   return body;
+}
+
+/// Render ships as a fixed-width plain-text table inside a Discord code block.
+function shipTableText(ships) {
+  const headers = ["Player", "Entity", "Ship ID", "Ship", "Camo"];
+  const rows = ships.map((sh) => [
+    sh.player,
+    String(sh.entity_id),
+    sh.ship_param_id != null ? String(sh.ship_param_id) : "-",
+    sh.ship_name ?? "-",
+    sh.camo ?? "-",
+  ]);
+  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  const fmt = (cells) => cells.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd();
+  let out = "```\n" + fmt(headers) + "\n" + fmt(widths.map((n) => "-".repeat(n))) + "\n";
+  for (const r of rows) out += fmt(r) + "\n";
+  return out + "```\n";
 }
 
 function renderChart(r) {
@@ -516,10 +757,4 @@ function renderChart(r) {
       ${xTickLabels}
     </svg>
   `;
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
-  }[c]));
 }

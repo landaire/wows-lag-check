@@ -4,6 +4,7 @@ pub mod replay;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use gettext::Catalog;
 use wasm_bindgen::prelude::*;
 use wows_replays::ReplayFile;
 use wows_replays::analyzer::decoder::{DecodedPacketPayload, PacketDecoder};
@@ -14,6 +15,8 @@ use wowsunpack::data::Version;
 use wowsunpack::data::DataFileWithCallback;
 use wowsunpack::data::ship_config::parse_ship_config;
 use wowsunpack::error::GameDataError;
+use wowsunpack::game_params::types::{Param, Species};
+use wowsunpack::game_types::GameParamId;
 use wowsunpack::rpc::entitydefs::{EntitySpec, parse_scripts};
 use wowsunpack::rpc::typedefs::ArgValue;
 
@@ -45,20 +48,33 @@ pub fn replay_info(bytes: &[u8]) -> Result<JsValue, JsError> {
 }
 
 #[wasm_bindgen(js_name = analyzeReplay)]
-pub fn analyze_replay(bytes: &[u8], defs_bundle: &[u8]) -> Result<JsValue, JsError> {
-    let result = run_analysis(bytes, defs_bundle).map_err(|e| JsError::new(&e))?;
+pub fn analyze_replay(
+    bytes: &[u8],
+    defs_bundle: &[u8],
+    game_params: &[u8],
+    translations: &[u8],
+) -> Result<JsValue, JsError> {
+    let result = run_analysis(bytes, defs_bundle, game_params, translations).map_err(|e| JsError::new(&e))?;
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&format!("serialize: {e}")))
 }
 
 /// Parse a replay and run the spike analysis. With entity defs the replay goes
 /// through the full decoder (arena ID, consumables, kills, and per-spike event
 /// context); without them it falls back to the spec-free `RawPacketIterator`.
-pub fn run_analysis(bytes: &[u8], defs_bundle: &[u8]) -> Result<analysis::AnalysisResult, String> {
+/// `game_params` (rkyv blob) and `translations` (.mo catalog) resolve ship and
+/// camouflage display names; either may be empty.
+pub fn run_analysis(
+    bytes: &[u8],
+    defs_bundle: &[u8],
+    game_params: &[u8],
+    translations: &[u8],
+) -> Result<analysis::AnalysisResult, String> {
     let replay = ReplayFile::from_bytes(bytes).map_err(|e| format!("replay parse: {e}"))?;
 
     let build = replay::build_from_client_version(&replay.meta.clientVersionFromExe);
     let region = replay::detect_realm(&replay.packet_data);
     let specs = load_entity_specs(defs_bundle)?;
+    let resolver = NameResolver::load(game_params, translations);
 
     let mut samples = Vec::new();
     let mut server_ticks = Vec::new();
@@ -70,6 +86,7 @@ pub fn run_analysis(bytes: &[u8], defs_bundle: &[u8]) -> Result<analysis::Analys
         Some(specs) => decode_with_specs(
             &replay,
             specs,
+            &resolver,
             &mut samples,
             &mut server_ticks,
             &mut headers,
@@ -104,15 +121,18 @@ pub fn run_analysis(bytes: &[u8], defs_bundle: &[u8]) -> Result<analysis::Analys
         build,
         region,
         specs.is_some(),
+        resolver.loaded(),
         analysis::SpikeThresholds::default(),
     ))
 }
 
 /// Full decode pass: ping samples, server ticks, arena ID, and the in-game
-/// events (consumables, ship kills + death effects) used for spike context.
+/// events (consumables, ship kills + death effects, spots) used for spike
+/// context. Ship and camouflage names come from `resolver`.
 fn decode_with_specs(
     replay: &ReplayFile,
     specs: &[EntitySpec],
+    resolver: &NameResolver,
     samples: &mut Vec<analysis::NetStat>,
     server_ticks: &mut Vec<f32>,
     headers: &mut Vec<analysis::PacketHeader>,
@@ -130,11 +150,13 @@ fn decode_with_specs(
 
     // Ship entity -> equipped death effect name, harvested from shipConfig.
     let mut death_effects: HashMap<EntityId, &'static str> = HashMap::new();
+    // Ship entity -> equipped camouflage name, harvested from shipConfig.
+    let mut camos: HashMap<EntityId, String> = HashMap::new();
     // Ship entity -> last visibilityFlags. Bit 0 = visible to the recording
     // player; a 0 -> 1 transition is a "spotted" event.
     let mut visibility: HashMap<EntityId, i32> = HashMap::new();
-    // Ship entity -> player name and numeric ship param id, from the arena
-    // state. Used to label spotted/kill/consumable events.
+    // Ship entity -> player name, ship param id, and ship name, from the
+    // arena state. Used to label spotted/kill/consumable events.
     let mut ships: HashMap<EntityId, ShipInfo> = HashMap::new();
 
     let mut parser = Parser::new(specs);
@@ -160,52 +182,44 @@ fn decode_with_specs(
                     *arena_id = Some(*aid);
                 }
                 for p in player_states.iter().chain(bot_states.iter()) {
+                    let ship_param_id = p.ship_params_id();
                     ships.insert(
                         p.entity_id(),
                         ShipInfo {
-                            name: p.username().to_string(),
-                            ship_param_id: p.ship_params_id().map(|g| g.raw()),
+                            player: p.username().to_string(),
+                            ship_param_id: ship_param_id.map(|g| g.raw()),
+                            ship_name: ship_param_id.and_then(|id| resolver.ship_name(id)),
                         },
                     );
                 }
             }
             DecodedPacketPayload::EntityCreate(ec) => {
-                if let Some(effect) = death_effect_from_props(&ec.props, &version) {
-                    death_effects.insert(ec.entity_id, effect);
-                }
+                index_ship_config(&ec.props, ec.entity_id, &version, resolver, &mut death_effects, &mut camos);
             }
             DecodedPacketPayload::CellPlayerCreate(cpc) => {
-                if let Some(effect) = death_effect_from_props(&cpc.props, &version) {
-                    death_effects.insert(cpc.entity_id, effect);
-                }
+                index_ship_config(&cpc.props, cpc.entity_id, &version, resolver, &mut death_effects, &mut camos);
             }
             DecodedPacketPayload::Consumable { entity, consumable, .. } => {
                 events.push(GameEvent {
                     clock,
                     tick_offset: 0,
                     kind: "consumable".to_string(),
-                    text: format!("{} used {}", ship_label(&ships, *entity), consumable_name(consumable)),
-                    entity_id: Some(entity.raw()),
-                    ship_param_id: ships.get(entity).and_then(|s| s.ship_param_id),
+                    ships: vec![event_ship(&ships, &camos, *entity)],
+                    detail: consumable_name(consumable),
+                    death_effect: None,
                 });
             }
             DecodedPacketPayload::ShipDestroyed { killer, victim, cause } => {
-                let mut text = format!(
-                    "{} destroyed by {} ({})",
-                    ship_label(&ships, *victim),
-                    ship_label(&ships, *killer),
-                    death_cause_name(cause),
-                );
-                if let Some(effect) = death_effects.get(killer) {
-                    text.push_str(&format!("; killer's death effect: {effect}"));
-                }
                 events.push(GameEvent {
                     clock,
                     tick_offset: 0,
                     kind: "kill".to_string(),
-                    text,
-                    entity_id: Some(victim.raw()),
-                    ship_param_id: ships.get(victim).and_then(|s| s.ship_param_id),
+                    ships: vec![
+                        event_ship(&ships, &camos, *victim),
+                        event_ship(&ships, &camos, *killer),
+                    ],
+                    detail: death_cause_name(cause),
+                    death_effect: death_effects.get(killer).map(|e| e.to_string()),
                 });
             }
             DecodedPacketPayload::EntityProperty(ep) if ep.property == "visibilityFlags" => {
@@ -216,9 +230,9 @@ fn decode_with_specs(
                         clock,
                         tick_offset: 0,
                         kind: "spotted".to_string(),
-                        text: format!("Spotted {}", ship_label(&ships, ep.entity_id)),
-                        entity_id: Some(ep.entity_id.raw()),
-                        ship_param_id: ships.get(&ep.entity_id).and_then(|s| s.ship_param_id),
+                        ships: vec![event_ship(&ships, &camos, ep.entity_id)],
+                        detail: String::new(),
+                        death_effect: None,
                     });
                 }
                 visibility.insert(ep.entity_id, new);
@@ -233,36 +247,58 @@ fn net_stat(clock: f32, ns: &PlayerNetStatsPacket) -> analysis::NetStat {
     analysis::NetStat { clock, fps: ns.fps, ping: ns.ping, is_lagging: ns.is_lagging }
 }
 
-/// Player name and numeric ship param id for one ship entity, from the arena
-/// state packet.
+/// Player name, ship param id, and ship display name for one ship entity.
 struct ShipInfo {
-    name: String,
+    player: String,
     ship_param_id: Option<u64>,
+    ship_name: Option<String>,
 }
 
-/// Human-friendly label for a ship entity: the owning player's name, or
-/// `entity <id>` when the entity was not in the arena state.
-fn ship_label(ships: &HashMap<EntityId, ShipInfo>, eid: EntityId) -> String {
-    match ships.get(&eid) {
-        Some(s) if !s.name.is_empty() => s.name.clone(),
+/// Resolve a ship entity into an `EventShip`, merging the arena-state info
+/// (player, ship name/id) with the camouflage harvested from shipConfig.
+/// `player` falls back to `entity <id>` when the ship is unknown.
+fn event_ship(
+    ships: &HashMap<EntityId, ShipInfo>,
+    camos: &HashMap<EntityId, String>,
+    eid: EntityId,
+) -> analysis::EventShip {
+    let info = ships.get(&eid);
+    let player = match info {
+        Some(s) if !s.player.is_empty() => s.player.clone(),
         _ => format!("entity {}", eid.raw()),
+    };
+    analysis::EventShip {
+        entity_id: eid.raw(),
+        player,
+        ship_name: info.and_then(|s| s.ship_name.clone()),
+        ship_param_id: info.and_then(|s| s.ship_param_id),
+        camo: camos.get(&eid).cloned(),
     }
 }
 
-/// Pull the equipped death effect (if any) out of a ship's `shipConfig` blob,
-/// found in its entity-creation properties.
-fn death_effect_from_props(
+/// Parse a ship's `shipConfig` blob (from its entity-creation properties) and
+/// record the equipped death effect and camouflage, resolved from its
+/// exteriors list.
+fn index_ship_config(
     props: &HashMap<&str, ArgValue>,
+    entity_id: EntityId,
     version: &Version,
-) -> Option<&'static str> {
-    let ArgValue::Blob(blob) = props.get("shipConfig")? else {
-        return None;
+    resolver: &NameResolver,
+    death_effects: &mut HashMap<EntityId, &'static str>,
+    camos: &mut HashMap<EntityId, String>,
+) {
+    let Some(ArgValue::Blob(blob)) = props.get("shipConfig") else {
+        return;
     };
-    let config = parse_ship_config(blob, version).ok()?;
-    config
-        .exteriors()
-        .iter()
-        .find_map(|id| replay::death_effect_name(id.raw()))
+    let Ok(config) = parse_ship_config(blob, version) else {
+        return;
+    };
+    if let Some(effect) = config.exteriors().iter().find_map(|id| replay::death_effect_name(id.raw())) {
+        death_effects.insert(entity_id, effect);
+    }
+    if let Some(camo) = resolver.camo_name(config.exteriors()) {
+        camos.insert(entity_id, camo);
+    }
 }
 
 fn consumable_name(c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::Consumable>) -> String {
@@ -276,6 +312,93 @@ fn death_cause_name(c: &wowsunpack::recognized::Recognized<wowsunpack::game_type
     match c.known() {
         Some(known) => format!("{known:?}"),
         None => "unknown".to_string(),
+    }
+}
+
+/// zstd-decompress a blob when it carries the zstd magic; otherwise return it
+/// borrowed unchanged. The web client fetches the game-params rkyv and the .mo
+/// catalog zstd-compressed; the smoke harness may pass either form.
+fn inflate_if_zstd(data: &[u8]) -> Cow<'_, [u8]> {
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+    if data.len() < 4 || data[..4] != ZSTD_MAGIC {
+        return Cow::Borrowed(data);
+    }
+    let mut out = Vec::new();
+    let ok = ruzstd::decoding::StreamingDecoder::new(data)
+        .ok()
+        .and_then(|mut d| std::io::Read::read_to_end(&mut d, &mut out).ok())
+        .is_some();
+    Cow::Owned(if ok { out } else { Vec::new() })
+}
+
+/// Resolves ship and camouflage display names from the rkyv GameParams blob
+/// and the gettext translation catalog.
+struct NameResolver {
+    by_id: HashMap<GameParamId, Param>,
+    catalog: Option<Catalog>,
+}
+
+impl NameResolver {
+    /// Load from the game-params blob and the .mo translation catalog. Each
+    /// input may be a raw or zstd-compressed archive, and either may be empty,
+    /// which disables the corresponding lookups.
+    fn load(game_params: &[u8], translations: &[u8]) -> Self {
+        let rkyv_bytes = inflate_if_zstd(game_params);
+        let by_id = if rkyv_bytes.is_empty() {
+            HashMap::new()
+        } else {
+            rkyv::from_bytes::<Vec<Param>, rkyv::rancor::Error>(&rkyv_bytes)
+                .map(|params| params.into_iter().map(|p| (p.id(), p)).collect())
+                .unwrap_or_default()
+        };
+        let mo_bytes = inflate_if_zstd(translations);
+        let catalog = if mo_bytes.is_empty() {
+            None
+        } else {
+            Catalog::parse(&mo_bytes[..]).ok()
+        };
+        Self { by_id, catalog }
+    }
+
+    /// True once the GameParams blob has been parsed.
+    fn loaded(&self) -> bool {
+        !self.by_id.is_empty()
+    }
+
+    /// Translate an `IDS_*` key. None when the catalog is absent or returns the
+    /// key unchanged (gettext's signal for "not found").
+    fn translate(&self, key: &str) -> Option<String> {
+        let catalog = self.catalog.as_ref()?;
+        let value = catalog.gettext(key);
+        if value == key { None } else { Some(value.to_string()) }
+    }
+
+    /// Display name for a ship param id, e.g. "Utrecht".
+    fn ship_name(&self, id: GameParamId) -> Option<String> {
+        let param = self.by_id.get(&id)?;
+        self.translate(&format!("IDS_{}", param.index()))
+    }
+
+    /// Display name of the camouflage in a ship's exteriors list. The list also
+    /// holds signal flags, ensigns, and the death effect, which are skipped; a
+    /// ship carries at most one camouflage. The exterior's translation key is
+    /// `IDS_{name}` uppercased (unlike ships, which key off the index).
+    fn camo_name(&self, exteriors: &[GameParamId]) -> Option<String> {
+        for id in exteriors {
+            let Some(param) = self.by_id.get(id) else {
+                continue;
+            };
+            let is_camo = matches!(
+                param.species().and_then(|s| s.known()),
+                Some(Species::Permoflage | Species::Camouflage | Species::Skin | Species::MSkin)
+            );
+            if is_camo
+                && let Some(name) = self.translate(&format!("IDS_{}", param.name().to_uppercase()))
+            {
+                return Some(name);
+            }
+        }
+        None
     }
 }
 

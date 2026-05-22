@@ -15,6 +15,7 @@ tailwindcss -i web/style.css -o "$OUT/style.css" --minify
 
 echo ">>> copy static assets"
 cp web/index.html web/app.js "$OUT/"
+cp -r web/vendor "$OUT/"
 
 # Strip wasm-pack's gitignore so we can deploy the build artifact tree.
 rm -f "$OUT/pkg/.gitignore"

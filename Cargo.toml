@@ -17,7 +17,13 @@ console_error_panic_hook = { version = "0.1", optional = true }
 # Sans-io replay parser + entity-def parsing. default features = ["arc",
 # "parsing"] - no filesystem VFS, so these compile for wasm32.
 wows_replays = "0.34"
-wowsunpack = { version = "0.33", default-features = false, features = ["parsing"] }
+wowsunpack = { version = "0.33", default-features = false, features = ["parsing", "rkyv"] }
+
+# Game params (rkyv blob) + translation catalog (.mo) for ship and camo names.
+# The blob is fetched zstd-compressed and inflated with the pure-Rust ruzstd.
+rkyv = "0.8"
+gettext = "0.4"
+ruzstd = "0.8"
 
 [features]
 default = ["console_error_panic_hook"]

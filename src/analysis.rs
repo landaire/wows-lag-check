@@ -36,8 +36,22 @@ pub struct Spike {
     pub preceding_events: Vec<GameEvent>,
 }
 
-/// An in-game event used to give context to a spike. `kind` is one of
-/// "consumable", "kill", "spotted"; `text` is a human-readable summary.
+/// One ship involved in a game event, with the identifiers and cosmetics
+/// resolved from GameParams. `player` falls back to `entity <id>` when the
+/// ship was not seen in the arena state.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventShip {
+    pub entity_id: u32,
+    pub player: String,
+    pub ship_name: Option<String>,
+    pub ship_param_id: Option<u64>,
+    pub camo: Option<String>,
+}
+
+/// An in-game event giving context to a spike. `kind` is one of "consumable",
+/// "kill", "spotted". `ships` lists the ships involved — spotted: [ship];
+/// kill: [victim, killer]; consumable: [user] — and the display sentence is
+/// composed from these fields by the UI/Discord layer.
 #[derive(Debug, Clone, Serialize)]
 pub struct GameEvent {
     pub clock: f32,
@@ -46,12 +60,11 @@ pub struct GameEvent {
     /// attached to a spike.
     pub tick_offset: i32,
     pub kind: String,
-    pub text: String,
-    /// Entity ID of the ship the event concerns (spotted ship / kill victim).
-    pub entity_id: Option<u32>,
-    /// Numeric ship GameParamId of that ship, when known from the arena state.
-    /// The textual index (e.g. "PNSC010") needs GameParams and is not resolved.
-    pub ship_param_id: Option<u64>,
+    pub ships: Vec<EventShip>,
+    /// Kill: cause of death. Consumable: consumable name. Spotted: empty.
+    pub detail: String,
+    /// Killer's equipped death effect, for kill events.
+    pub death_effect: Option<String>,
 }
 
 /// How far before a spike to collect context events.
@@ -122,6 +135,8 @@ pub struct AnalysisResult {
     /// True when entity definitions were loaded and the replay was parsed
     /// through the full parser (arena ID available).
     pub entity_defs_loaded: bool,
+    /// True when the GameParams blob loaded, so ship and camo names resolve.
+    pub game_params_loaded: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,6 +174,7 @@ pub fn build_analysis(
     client_build: Option<u32>,
     region: Option<&'static str>,
     entity_defs_loaded: bool,
+    game_params_loaded: bool,
     thresholds: SpikeThresholds,
 ) -> AnalysisResult {
     let samples_out: Vec<PingSample> = samples
@@ -234,6 +250,7 @@ pub fn build_analysis(
         replay_duration_s,
         severity,
         entity_defs_loaded,
+        game_params_loaded,
     }
 }
 
