@@ -42,7 +42,11 @@ const SEVERITY_STYLE = {
   severe:   { dot: "bg-rose-500",     card: "border-rose-700    bg-rose-950/50",     label: "Severe",   sub: "Match-affecting stall(s)" },
 };
 
-const KIND_DOT = { kill: "bg-rose-400", consumable: "bg-sky-400", spotted: "bg-amber-400" };
+const KIND_ICON = {
+  kill:       { icon: "ph-crosshair", color: "text-rose-400" },
+  consumable: { icon: "ph-shield", color: "text-sky-400" },
+  spotted:    { icon: "ph-eye",    color: "text-amber-400" },
+};
 
 // Hover linking: highlight every element sharing the hovered element's data-eid
 // within the Spikes card, so a player name in any spike event and that player's
@@ -561,7 +565,7 @@ function composeEvent(e) {
 /// ship table below. Each player name is a chip linked to its table row.
 function eventLine(s, e) {
   const dt = (s.gap_start_clock - e.clock).toFixed(2);
-  const dot = KIND_DOT[e.kind] ?? "bg-slate-400";
+  const kind = KIND_ICON[e.kind] ?? { icon: "ph-circle", color: "text-slate-400" };
   const parts = composeEvent(e).map((p) =>
     p.t === "ship"
       ? html`<span class="evt-name" data-eid=${p.v.entity_id}>${p.v.player}</span>`
@@ -571,7 +575,7 @@ function eventLine(s, e) {
     <div class="flex gap-2 items-baseline">
       <span class="text-slate-500 font-mono shrink-0">-${dt}s (${e.tick_offset} ticks)</span>
       <span class="inline-flex items-baseline gap-1.5 flex-wrap">
-        <span class="size-1.5 rounded-full ${dot}"></span>
+        <i class="ph ${kind.icon} ${kind.color} text-sm shrink-0"></i>
         <span>${parts}</span>
       </span>
     </div>`;
