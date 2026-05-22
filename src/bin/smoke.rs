@@ -1,9 +1,4 @@
-// cargo run --release --bin smoke -- <replay.wowsreplay> [<build-dir>]
-//
-// <build-dir> is an optional wows-replay-data build directory (e.g.
-// G:\wows_builds\15.4.0_12506899). When given, entity defs are loaded from its
-// vfs/scripts/ tree, game_params.rkyv and translations/en/.../global.mo are
-// loaded for ship/camo names, and the replay is parsed through the full parser.
+// cargo run --release --bin smoke -- <replay> [<build-dir>]
 
 use std::fs;
 use std::path::Path;
@@ -20,23 +15,11 @@ fn main() {
         .map(|d| BuildData::load(Path::new(d)))
         .unwrap_or_default();
 
-    let result = run_analysis(
-        &bytes,
-        &data.defs_bundle,
-        &data.game_params,
-        &data.translations,
-        None,
-    )
-    .expect("analysis");
+    let result = run_analysis(&bytes, &data.defs_bundle, &data.game_params, &data.translations, None)
+        .expect("analysis");
 
-    println!(
-        "=== {} ({}) ===",
-        result.meta.player_vehicle, result.meta.player_name
-    );
-    println!(
-        "Map: {}  Mode: {}",
-        result.meta.map_display_name, result.meta.game_type
-    );
+    println!("=== {} ({}) ===", result.meta.player_vehicle, result.meta.player_name);
+    println!("Map: {}  Mode: {}", result.meta.map_display_name, result.meta.game_type);
     println!("Client: {}", result.meta.client_version);
     println!("Entity defs loaded: {}", result.entity_defs_loaded);
     println!("Game params loaded: {}", result.game_params_loaded);
@@ -44,15 +27,9 @@ fn main() {
         (Some(d), Some(h)) => println!("Arena ID: {d} (0x{h})"),
         _ => println!("Arena ID: (not found)"),
     }
-    println!(
-        "Server:   {}",
-        result.meta.region.as_deref().unwrap_or("(unknown)")
-    );
+    println!("Server:   {}", result.meta.region.as_deref().unwrap_or("(unknown)"));
     println!("Battle start clock: {:.3}s", result.battle_start_clock_s);
-    println!(
-        "Severity: {:?} ({})",
-        result.severity.severity, result.severity.headline
-    );
+    println!("Severity: {:?} ({})", result.severity.severity, result.severity.headline);
     println!();
     println!("PlayerNetStats samples: {}", result.samples_total);
     println!("ServerTick packets:    {}", result.server_ticks_total);
@@ -60,11 +37,7 @@ fn main() {
     if result.corrupt_packet_clocks.is_empty() {
         println!("Corrupt-clock packets: 0");
     } else {
-        let cs: Vec<String> = result
-            .corrupt_packet_clocks
-            .iter()
-            .map(|c| format!("{c:.1}s"))
-            .collect();
+        let cs: Vec<String> = result.corrupt_packet_clocks.iter().map(|c| format!("{c:.1}s")).collect();
         println!(
             "Corrupt-clock packets: {} (at {})",
             result.corrupt_packet_clocks.len(),
@@ -75,11 +48,7 @@ fn main() {
     println!("=== {} spikes (gap >= 500ms) ===", result.spikes.len());
     for s in &result.spikes {
         let bt = (s.gap_start_clock - result.battle_start_clock_s).max(0.0);
-        let kind = if s.client_present_during_gap {
-            "server-only"
-        } else {
-            "client+server"
-        };
+        let kind = if s.client_present_during_gap { "server-only" } else { "client+server" };
         let burst = if s.burst_ticks > 1 {
             format!("  burst {} ticks", s.burst_ticks)
         } else {
@@ -97,13 +66,9 @@ fn main() {
         );
         for ev in &s.preceding_events {
             let players: Vec<&str> = ev.ships.iter().map(|sh| sh.player.as_str()).collect();
-            let effect = ev
-                .death_effect
-                .as_deref()
-                .map(|e| format!(" [{e}]"))
-                .unwrap_or_default();
+            let effect = ev.death_effect.as_deref().map(|e| format!(" [{e}]")).unwrap_or_default();
             println!(
-                "        -{:.2}s ({} ticks)  [{}] {} {}{}",
+                "        -{:.2}s ({} ticks)  [{:?}] {} {}{}",
                 s.gap_start_clock - ev.clock,
                 ev.tick_offset,
                 ev.kind,
@@ -116,9 +81,7 @@ fn main() {
                     "              {} | entity {} | ship {} | {} | camo {}",
                     sh.player,
                     sh.entity_id,
-                    sh.ship_param_id
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "-".into()),
+                    sh.ship_param_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
                     sh.ship_name.as_deref().unwrap_or("-"),
                     sh.camo.as_deref().unwrap_or("-"),
                 );
@@ -127,7 +90,6 @@ fn main() {
     }
 }
 
-/// Per-build inputs loaded from a wows-replay-data build directory.
 #[derive(Default)]
 struct BuildData {
     defs_bundle: Vec<u8>,
@@ -137,7 +99,6 @@ struct BuildData {
 
 impl BuildData {
     fn load(dir: &Path) -> BuildData {
-        // Prefer the zstd blobs (what the web client uses); fall back to raw.
         let game_params = fs::read(dir.join("game_params.rkyv.zst"))
             .or_else(|_| fs::read(dir.join("game_params.rkyv")))
             .unwrap_or_default();
@@ -153,8 +114,6 @@ impl BuildData {
     }
 }
 
-/// Walk `<build-dir>/vfs/scripts/` and pack every file into the bundle format
-/// `unpack_def_bundle` expects, keyed by the path relative to `vfs/`.
 fn bundle_entity_defs(build_dir: &Path) -> Vec<u8> {
     let scripts = build_dir.join("vfs").join("scripts");
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -172,23 +131,14 @@ fn bundle_entity_defs(build_dir: &Path) -> Vec<u8> {
 }
 
 fn collect_files(dir: &Path, vfs_root: &Path, out: &mut Vec<(String, Vec<u8>)>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
+    let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        // fs::metadata follows symlinks (the dump uses CAS symlinks).
-        let Ok(meta) = fs::metadata(&path) else {
-            continue;
-        };
+        let Ok(meta) = fs::metadata(&path) else { continue };
         if meta.is_dir() {
             collect_files(&path, vfs_root, out);
         } else if let Ok(content) = fs::read(&path) {
-            let key = path
-                .strip_prefix(vfs_root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
+            let key = path.strip_prefix(vfs_root).unwrap().to_string_lossy().replace('\\', "/");
             out.push((key, content));
         }
     }

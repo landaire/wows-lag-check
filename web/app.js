@@ -1,12 +1,12 @@
 import init, { analyzeReplay, replayInfo } from "./pkg/wows_lag_check.js";
 import { html, render, svg } from "./vendor/lit-html.js";
 
-// Per-build game entity definitions, fetched on demand.
 const DATA_REPO = "landaire/wows-replay-data";
 const DATA_API = `https://api.github.com/repos/${DATA_REPO}/contents`;
 const DATA_RAW = `https://raw.githubusercontent.com/${DATA_REPO}/main`;
-const entityDefCache = new Map(); // dirName -> Uint8Array bundle
-const gameDataCache = new Map(); // dirName -> { gameParams, translations }
+const entityDefCache = new Map();
+const gameDataCache = new Map();
+const REPLAY_EXTS = [".wowsreplay", ".wotreplay"];
 
 const dropzone = document.getElementById("dropzone");
 const fileInput = document.getElementById("fileInput");
@@ -37,8 +37,6 @@ const thresholdReset = document.getElementById("thresholdReset");
 
 let wasmReady = init();
 let lastResult = null;
-/// Cached inputs for the most recently loaded replay, used when re-running
-/// analysis after a slider change without re-fetching game data.
 let lastInputs = null;
 let popoverTimer = null;
 
@@ -59,10 +57,7 @@ const KIND_ICON = {
   spotted:    { icon: "ph-eye",    color: "text-amber-400" },
 };
 
-// Hover linking: highlight every element sharing the hovered element's data-eid
-// within the Spikes card, so a player name in any spike event and that player's
-// row in the players table light up together. Delegated once; survives
-// lit-html re-renders.
+// Hover-link elements that share a data-eid (player name <-> table row).
 spikesCard.addEventListener("mouseover", (ev) => {
   const el = ev.target.closest("[data-eid]");
   if (!el) return;
@@ -77,8 +72,6 @@ spikesCard.addEventListener("mouseout", (ev) => {
   }
 });
 
-/// Render a finished state in the status box: a check or warning icon plus
-/// a message. `kind` is "ok" or "error".
 function setStatus(kind, msg) {
   statusSection.classList.remove("hidden");
   const ok = kind !== "error";
@@ -92,9 +85,6 @@ function setStatus(kind, msg) {
   `, statusBox);
 }
 
-/// Render an in-progress step in the status box: a spinning icon, a friendly
-/// title, the file/path detail, and a progress bar when `percent` is a number
-/// (pass null for an indeterminate step).
 function showLoading(title, detail, percent) {
   statusSection.classList.remove("hidden");
   statusBox.className = "rounded-lg px-4 py-3 text-sm border bg-sky-950 text-sky-200 border-sky-900";
@@ -204,9 +194,6 @@ thresholdReset.addEventListener("click", () => {
   scheduleReanalyze();
 });
 
-/// Re-run analysis on the cached replay inputs after the slider settles. The
-/// WASM call is synchronous and can be slow for big replays, so we debounce
-/// while the user drags.
 function scheduleReanalyze() {
   if (!lastInputs) return;
   if (thresholdDebounce) clearTimeout(thresholdDebounce);
@@ -269,11 +256,12 @@ document.addEventListener("click", (e) => {
 });
 
 async function handleFile(file) {
-  if (!file.name.toLowerCase().endsWith(".wowsreplay")) {
-    setStatus("error", `"${file.name}" doesn't look like a .wowsreplay file.`);
+  const name = file.name.toLowerCase();
+  if (!REPLAY_EXTS.some((ext) => name.endsWith(ext))) {
+    setStatus("error", `"${file.name}" is not a replay file.`);
     return;
   }
-  showLoading("Reading your replay...", file.name, null);
+  showLoading("Reading replay...", file.name, null);
   resultSection.classList.add("hidden");
 
   try {
@@ -281,40 +269,36 @@ async function handleFile(file) {
     const bytes = new Uint8Array(await file.arrayBuffer());
 
     const info = replayInfo(bytes);
+    const isWot = info.game === "wot";
     let defsBundle = new Uint8Array(0);
     let gameParams = new Uint8Array(0);
     let translations = new Uint8Array(0);
-    if (info.dir_name) {
+    if (info.dir_name && !isWot) {
       try {
         defsBundle = await fetchEntityDefs(info.dir_name, (done, total) => {
           showLoading(
-            "Hauling in game data...",
-            total ? `${info.dir_name}: ship definitions, file ${done} of ${total}`
-                  : `${info.dir_name}: listing ship definitions...`,
+            "Loading game data...",
+            total ? `${info.dir_name}: file ${done} of ${total}`
+                  : `${info.dir_name}: listing...`,
             total ? (done / total) * 100 : null,
           );
         });
       } catch (err) {
-        console.warn("Entity defs unavailable, parsing without them:", err);
+        console.warn("Entity defs unavailable:", err);
       }
       try {
         const gd = await fetchGameData(info.dir_name, (path, loaded, total) => {
           const mb = (loaded / 1024 / 1024).toFixed(1);
-          showLoading(
-            "Hauling in game data...",
-            `${path}  (${mb} MB)`,
-            total ? (loaded / total) * 100 : null,
-          );
+          showLoading("Loading game data...", `${path}  (${mb} MB)`, total ? (loaded / total) * 100 : null);
         });
         gameParams = gd.gameParams;
         translations = gd.translations;
       } catch (err) {
-        console.warn("Game params unavailable, ship names disabled:", err);
+        console.warn("Game params unavailable:", err);
       }
     }
 
-    showLoading("Hunting for lag spikes...", "Crunching the replay. This can take a few seconds.", null);
-    // Let the browser paint the spinner before the synchronous WASM call.
+    showLoading("Analyzing...", null, null);
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
 
     lastInputs = { bytes, defsBundle, gameParams, translations };
@@ -322,28 +306,23 @@ async function handleFile(file) {
     const result = analyzeReplay(bytes, defsBundle, gameParams, translations, thresholdMs);
     const ms = (performance.now() - t0).toFixed(0);
     let dataNote = "";
-    if (!result.entity_defs_loaded) dataNote = " (entity defs unavailable)";
-    else if (!result.game_params_loaded) dataNote = " (ship names unavailable)";
+    if (isWot) dataNote = " (WoT: basic mode)";
+    else if (!result.entity_defs_loaded) dataNote = " (no entity defs)";
+    else if (!result.game_params_loaded) dataNote = " (no ship names)";
     const corruptClocks = result.corrupt_packet_clocks ?? [];
     let corruptNote = "";
-    if (corruptClocks.length === 1) {
-      corruptNote = ` Skipped 1 packet with a corrupt clock at ~${Math.round(corruptClocks[0])}s.`;
-    } else if (corruptClocks.length > 1) {
-      corruptNote = ` Skipped ${corruptClocks.length} packets with corrupt clocks (first at ~${Math.round(corruptClocks[0])}s).`;
+    if (corruptClocks.length > 0) {
+      corruptNote = ` Skipped ${corruptClocks.length} corrupt packet${corruptClocks.length === 1 ? "" : "s"}.`;
     }
-    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} ping samples, ${result.server_ticks_total} server ticks, ${result.spikes.length} spikes.${dataNote}${corruptNote}`);
+    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} samples, ${result.server_ticks_total} ticks, ${result.spikes.length} spikes.${dataNote}${corruptNote}`);
     lastResult = result;
     renderResult(result);
   } catch (err) {
     console.error(err);
-    setStatus("error", `Failed to parse: ${err.message ?? err}`);
+    setStatus("error", `Failed: ${err.message ?? err}`);
   }
 }
 
-/// Fetch the entity-def tree for a build from the wows-replay-data repo and
-/// pack it into the bundle format the WASM module expects. Git symlinks (the
-/// repo dedupes def files via a content-addressed vfs_common/ store) are
-/// detected by their `../` content and resolved to the real blob.
 async function fetchEntityDefs(dirName, onProgress) {
   if (entityDefCache.has(dirName)) {
     return entityDefCache.get(dirName);
@@ -380,29 +359,19 @@ async function fetchEntityDefs(dirName, onProgress) {
   return bundle;
 }
 
-/// Fetch the GameParams blob and English translation catalog for a build.
-/// These resolve ship and camouflage display names. Both are zstd-compressed
-/// (~1.3 MB blob, ~1.5 MB catalog); the WASM module inflates them. The browser
-/// caches them by ETag, so repeat loads revalidate cheaply.
 async function fetchGameData(dirName, onProgress) {
   if (gameDataCache.has(dirName)) {
     return gameDataCache.get(dirName);
   }
-  // Fetched sequentially so the progress bar tracks one file at a time.
   const gpPath = `${dirName}/game_params.rkyv.zst`;
   const moPath = `${dirName}/translations/en/LC_MESSAGES/global.mo.zst`;
-  const gameParams = await fetchRepoFile(gpPath,
-    (loaded, total) => onProgress?.(gpPath, loaded, total));
-  const translations = await fetchRepoFile(moPath,
-    (loaded, total) => onProgress?.(moPath, loaded, total));
+  const gameParams = await fetchRepoFile(gpPath, (loaded, total) => onProgress?.(gpPath, loaded, total));
+  const translations = await fetchRepoFile(moPath, (loaded, total) => onProgress?.(moPath, loaded, total));
   const data = { gameParams, translations };
   gameDataCache.set(dirName, data);
   return data;
 }
 
-/// Fetch a URL into a Uint8Array. With an `onProgress(loaded, total)` callback
-/// the body is streamed so download progress can be reported; without one it
-/// takes the simple buffered path.
 async function fetchBytes(url, onProgress) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`fetch ${url}: HTTP ${resp.status}`);
@@ -429,10 +398,7 @@ async function fetchBytes(url, onProgress) {
   return out;
 }
 
-/// Fetch a repo file, transparently resolving a git symlink. The repo
-/// deduplicates files into a content-addressed vfs_common/ store, so most
-/// files are symlinks; raw.githubusercontent.com serves a symlink as a short
-/// text blob holding its `../`-relative target path.
+// Resolves repo symlinks (`../`-relative path blobs) to the real file.
 async function fetchRepoFile(repoPath, onProgress) {
   const content = await fetchBytes(`${DATA_RAW}/${repoPath}`);
   if (new TextDecoder().decode(content.subarray(0, 3)) !== "../") {
@@ -443,8 +409,6 @@ async function fetchRepoFile(repoPath, onProgress) {
   return fetchBytes(`${DATA_RAW}/${resolveRepoPath(dir, target)}`, onProgress);
 }
 
-/// Resolve a relative path (a symlink target) against a repo directory,
-/// returning a repo-root-relative path.
 function resolveRepoPath(baseDir, rel) {
   const parts = baseDir.split("/").filter(Boolean);
   for (const seg of rel.split("/")) {
@@ -454,7 +418,6 @@ function resolveRepoPath(baseDir, rel) {
   return parts.join("/");
 }
 
-/// Pack [{key, content}] into [u32 count]([u32 keyLen][key][u32 contentLen][content])*
 function packBundle(files) {
   const enc = new TextEncoder();
   const parts = files.map((f) => ({ key: enc.encode(f.key), content: f.content }));
@@ -492,8 +455,6 @@ function fmtBattleClock(replayClock, battleStart) {
   return fmtClock(elapsed);
 }
 
-/// Format an interval in seconds as MM:SS:mmm (two-digit minutes and seconds,
-/// three-digit milliseconds). Returns an empty string for null/missing/negative.
 function fmtSinceLast(seconds) {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "";
   const totalMs = Math.round(seconds * 1000);
@@ -520,12 +481,11 @@ function renderResult(r) {
     ? `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= ${r.spike_threshold_ms} ms`
     : "";
 
-  // One players table for the whole section, so ships aren't repeated per spike.
   const allShips = involvedShips(r.spikes.flatMap((s) => s.preceding_events ?? []));
   spikeShips.classList.toggle("hidden", allShips.length === 0);
   render(
     allShips.length
-      ? html`<div class="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Players involved</div>${shipsTable(allShips)}`
+      ? html`<div class="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Players</div>${shipsTable(allShips)}`
       : "",
     spikeShips,
   );
@@ -534,22 +494,20 @@ function renderResult(r) {
 
   const m = r.meta;
   const metaRows = [
-    ["Player",          m.player_name],
-    ["Ship",            m.player_vehicle],
-    ["Map",             `${m.map_display_name || m.map}`],
-    ["Mode",            `${m.game_type} (${m.match_group})`],
-    ["Server",          m.region ?? "(unknown)"],
-    ["Date",            m.date_time],
-    ["Client",          m.client_version],
-    ["Players/team",    String(m.players_per_team)],
-    ["Battle duration", `${m.battle_duration_s}s`],
-    ["Replay duration", `${r.replay_duration_s.toFixed(1)}s`],
-    ["Arena ID",        m.arena_id
-      ? `${m.arena_id} (0x${m.arena_id_hex})`
-      : r.entity_defs_loaded
-        ? "(not found)"
-        : `(needs entity defs for build ${m.client_build ?? "?"})`],
+    ["Player",   m.player_name],
+    ["Vehicle",  m.player_vehicle],
+    ["Map",      m.map_display_name || m.map],
+    ["Mode",     m.match_group ? `${m.game_type} (${m.match_group})` : m.game_type],
+    ["Server",   m.region ?? "(unknown)"],
+    ["Date",     m.date_time],
+    ["Client",   m.client_version],
   ];
+  if (m.players_per_team) metaRows.push(["Players/team", String(m.players_per_team)]);
+  if (m.battle_duration_s) metaRows.push(["Battle duration", `${m.battle_duration_s}s`]);
+  metaRows.push(["Replay duration", `${r.replay_duration_s.toFixed(1)}s`]);
+  if (m.arena_id) {
+    metaRows.push(["Arena ID", `${m.arena_id} (0x${m.arena_id_hex})`]);
+  }
   render(defList(metaRows, "text-slate-200 font-mono break-all"), metaList);
 
   const ps = r.ping_stats;
@@ -561,8 +519,6 @@ function renderResult(r) {
   ], "text-slate-200 font-medium"), pingStats);
 }
 
-/// The spike table body: one row per spike, plus an expandable detail row for
-/// spikes that have a stutter burst or preceding events.
 function spikeRowsTemplate(r) {
   if (r.spikes.length === 0) {
     return html`<tr><td colspan="7" class="py-3 text-slate-500">No gaps over ${r.spike_threshold_ms} ms detected.</td></tr>`;
@@ -610,9 +566,7 @@ function spikeRow(s, r) {
     </tr>`;
 }
 
-/// Decompose an event into ordered parts: plain text and ship references.
-/// The UI renders ship parts as hover chips; Discord renders them as plain
-/// player names. The display sentence lives here, in one place.
+// Event sentence as text/ship parts. UI renders ships as chips; Discord as plain names.
 function composeEvent(e) {
   const ships = e.ships ?? [];
   const t = (v) => ({ t: "text", v });
@@ -626,9 +580,6 @@ function composeEvent(e) {
   return [t(e.kind)];
 }
 
-/// One preceding-event line: time/tick offset, a kind icon, and the event
-/// sentence with player names only. Ids, ships, and camo move to the ship
-/// table below; each player name is a chip linked to its table row.
 function eventLine(s, e) {
   const dt = (s.gap_start_clock - e.clock).toFixed(2);
   const kind = KIND_ICON[e.kind] ?? { icon: "ph-circle", color: "text-slate-400" };
@@ -647,7 +598,6 @@ function eventLine(s, e) {
     </div>`;
 }
 
-/// Distinct ships referenced by a list of events, in first-seen order.
 function involvedShips(events) {
   const seen = new Map();
   for (const e of events) {
@@ -658,8 +608,6 @@ function involvedShips(events) {
   return [...seen.values()];
 }
 
-/// A compact ship table: each row carries data-eid so hovering a player name
-/// in an event line highlights the matching row (and vice versa).
 function shipsTable(ships) {
   return html`
     <table class="w-full text-[11px] border-separate border-spacing-0">
@@ -685,8 +633,6 @@ function shipsTable(ships) {
     </table>`;
 }
 
-/// `[key, value]` pairs as <dt>/<dd> nodes. lit-html escapes the interpolated
-/// values, so replay-controlled strings can never be interpreted as markup.
 function defList(rows, ddClass) {
   return rows.map(([k, v]) => html`
     <dt class="text-slate-500">${k}</dt>
@@ -743,7 +689,6 @@ ${arenaLine}
   return body;
 }
 
-/// Render ships as a fixed-width plain-text table inside a Discord code block.
 function shipTableText(ships) {
   const headers = ["Player", "Entity", "Ship ID", "Ship", "Camo"];
   const rows = ships.map((sh) => [
@@ -809,9 +754,7 @@ function renderChart(r) {
     return svg`<rect x=${xs} y=${pad.t} width=${w} height=${innerH} fill=${fill} stroke=${stroke} stroke-width="1"/>`;
   });
 
-  // Annotate the quiet interval between adjacent spike bands. End caps and a
-  // dashed line span the lull; the label sits on a darkened pill so it stays
-  // readable regardless of the underlying chart content.
+  // Quiet-interval annotation between adjacent spike bands.
   const sinceLineY = pad.t + 8;
   const sinceY = pad.t + 22;
   const LABEL_HALF_PX = 40;

@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = { version = "0.1", optional = true }
 
@@ -24,6 +25,14 @@ wowsunpack = { version = "0.33", default-features = false, features = ["parsing"
 rkyv = "0.8"
 gettext = "0.4"
 ruzstd = "0.8"
+
+# WoT replays don't go through wows_replays (different Blowfish key, different
+# packet ids), so we open the body directly. Same Blowfish + zlib + winnow
+# stack the WoWs parser uses, just configured per-game.
+blowfish = "0.9"
+cipher = "0.4"
+byteorder = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [features]
 default = ["console_error_panic_hook"]

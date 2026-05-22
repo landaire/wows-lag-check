@@ -1,7 +1,5 @@
 use serde::Serialize;
-use wows_replays::packet2::PacketTypeId;
 
-/// One PlayerNetStats observation, with the clock pulled from the packet header.
 #[derive(Debug, Clone, Copy)]
 pub struct NetStat {
     pub clock: f32,
@@ -28,20 +26,12 @@ pub struct Spike {
     pub client_packets_in_gap: u32,
     pub client_rate_hz: f32,
     pub client_present_during_gap: bool,
-    /// ServerTick packets stamped with the gap-start clock. A value above 1
-    /// means the server fired repeated ticks without advancing the game clock
-    /// just before freezing: a stutter burst.
+    /// >1 means the server fired repeated ticks at the same clock before freezing.
     pub burst_ticks: u32,
-    /// Replay-clock seconds between the end of the previous spike and the
-    /// start of this one. None for the first spike in the replay.
     pub seconds_since_previous_spike: Option<f32>,
-    /// In-game events in the 2 s window before the spike started.
     pub preceding_events: Vec<GameEvent>,
 }
 
-/// One ship involved in a game event, with the identifiers and cosmetics
-/// resolved from GameParams. `player` falls back to `entity <id>` when the
-/// ship was not seen in the arena state.
 #[derive(Debug, Clone, Serialize)]
 pub struct EventShip {
     pub entity_id: u32,
@@ -51,26 +41,25 @@ pub struct EventShip {
     pub camo: Option<String>,
 }
 
-/// An in-game event giving context to a spike. `kind` is one of "consumable",
-/// "kill", "spotted". `ships` lists the ships involved (spotted: [ship];
-/// kill: [victim, killer]; consumable: [user]); the display sentence is
-/// composed from these fields by the UI/Discord layer.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EventKind {
+    Consumable,
+    Kill,
+    Spotted,
+}
+
+/// `ships` is by-position (Spotted: [ship]; Kill: [victim, killer]; Consumable: [user]).
 #[derive(Debug, Clone, Serialize)]
 pub struct GameEvent {
     pub clock: f32,
-    /// Distinct server-tick instants between this event and the spike it
-    /// precedes (negative = before the spike). Filled in when the event is
-    /// attached to a spike.
     pub tick_offset: i32,
-    pub kind: String,
+    pub kind: EventKind,
     pub ships: Vec<EventShip>,
-    /// Kill: cause of death. Consumable: consumable name. Spotted: empty.
     pub detail: String,
-    /// Killer's equipped death effect, for kill events.
     pub death_effect: Option<String>,
 }
 
-/// How far before a spike to collect context events.
 pub const EVENT_WINDOW_S: f32 = 2.0;
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,9 +78,6 @@ pub struct ReplayMetaOut {
     pub arena_id: Option<String>,
     pub arena_id_hex: Option<String>,
     pub client_build: Option<u32>,
-    /// Server/region the match was played on. Read from the self-player's
-    /// state when entity defs are loaded; otherwise approximated by scanning
-    /// the decrypted packet bytes for pickle realm tokens.
     pub region: Option<String>,
 }
 
@@ -125,12 +111,9 @@ pub struct SeveritySummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisResult {
     pub meta: ReplayMetaOut,
-    /// Replay-clock seconds at which the battle timer reads 20:00. Exact when
-    /// the BattleLogic `battleStage` property is captured (requires entity defs);
-    /// otherwise a 30.94s fallback that matches Random/Co-op/Ranked/Brawl.
     pub battle_start_clock_s: f32,
-    /// True when `battle_start_clock_s` came from the BattleLogic.battleStage
-    /// signal, false when it's the 30.94s fallback.
+    /// True when battle_start_clock_s came from BattleLogic.battleStage; false
+    /// when it's the 30.94s fallback.
     pub battle_start_clock_exact: bool,
     pub samples: Vec<PingSample>,
     pub server_tick_clocks: Vec<f32>,
@@ -139,21 +122,10 @@ pub struct AnalysisResult {
     pub samples_total: u32,
     pub server_ticks_total: u32,
     pub replay_duration_s: f32,
-    /// Spike-detection threshold (ms) used to produce `spikes`. Mirrors the
-    /// `SpikeThresholds` passed into `build_analysis` so the UI can render a
-    /// label that matches the threshold these particular spikes were filtered
-    /// against, not whatever the slider currently reads.
     pub spike_threshold_ms: u32,
     pub severity: SeveritySummary,
-    /// True when entity definitions were loaded and the replay was parsed
-    /// through the full parser (arena ID available).
     pub entity_defs_loaded: bool,
-    /// True when the GameParams blob loaded, so ship and camo names resolve.
     pub game_params_loaded: bool,
-    /// Approximate clocks (in replay seconds) of packets dropped during
-    /// parsing for having a corrupt clock. Each entry uses the last valid
-    /// clock seen before the corrupt packet, since the corrupt one's own
-    /// clock is garbage. The count is `.len()`.
     pub corrupt_packet_clocks: Vec<f32>,
 }
 
@@ -168,29 +140,19 @@ impl Default for SpikeThresholds {
     }
 }
 
+/// `is_client_side` flags packets that flow client-to-server independently of
+/// the server tick (WoWs: Camera, GunMarker, PlayerNetStats).
 pub struct PacketHeader {
     pub clock: f32,
-    pub ptype: PacketTypeId,
-}
-
-/// Camera, GunMarker, and PlayerNetStats are each emitted on a 10 Hz client
-/// timer (~30 Hz combined), independent of the 7 Hz server tick.
-pub fn is_client_side_packet(ptype: PacketTypeId) -> bool {
-    matches!(
-        ptype,
-        PacketTypeId::Camera | PacketTypeId::GunMarker | PacketTypeId::PlayerNetStats
-    )
+    pub is_client_side: bool,
 }
 
 pub fn build_analysis(
-    meta: wows_replays::ReplayMeta,
+    meta: ReplayMetaOut,
     samples: Vec<NetStat>,
     server_ticks: Vec<f32>,
     headers: Vec<PacketHeader>,
     mut events: Vec<GameEvent>,
-    arena_id: Option<i64>,
-    client_build: Option<u32>,
-    region: Option<String>,
     entity_defs_loaded: bool,
     game_params_loaded: bool,
     battle_start_clock: Option<f32>,
@@ -199,20 +161,11 @@ pub fn build_analysis(
 ) -> AnalysisResult {
     let samples_out: Vec<PingSample> = samples
         .iter()
-        .map(|s| PingSample {
-            clock: s.clock,
-            ping_ms: s.ping,
-            fps: s.fps,
-            is_lagging: s.is_lagging,
-        })
+        .map(|s| PingSample { clock: s.clock, ping_ms: s.ping, fps: s.fps, is_lagging: s.is_lagging })
         .collect();
 
     let ping_stats = compute_ping_stats(&samples);
-    events.sort_by(|a, b| {
-        a.clock
-            .partial_cmp(&b.clock)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    events.sort_by(|a, b| a.clock.partial_cmp(&b.clock).unwrap_or(std::cmp::Ordering::Equal));
     let mut spikes = detect_spikes(&server_ticks, &samples, &headers, thresholds);
     let mut prev_end: Option<f32> = None;
     for spike in &mut spikes {
@@ -220,17 +173,12 @@ pub fn build_analysis(
             prev_end.map(|end| (spike.gap_start_clock - end).max(0.0));
         prev_end = Some(spike.gap_end_clock);
     }
-    // The server can emit a burst of ticks all stamped with the same clock
-    // (a stutter just before a freeze). Collapse those so a tick offset
-    // counts distinct game-clock instants, not raw packets.
     let mut distinct_ticks = server_ticks.clone();
     distinct_ticks.dedup();
 
     for spike in &mut spikes {
         let lo = spike.gap_start_clock - EVENT_WINDOW_S;
         let hi = spike.gap_start_clock;
-        // distinct_ticks is monotonic, so partition_point counts ticks at or
-        // before a clock. The offset is event-tick-count minus spike-tick-count.
         let gap_ticks = distinct_ticks.partition_point(|&t| t <= spike.gap_start_clock) as i32;
         spike.preceding_events = events
             .iter()
@@ -245,31 +193,12 @@ pub fn build_analysis(
     }
 
     let replay_duration_s = headers.iter().map(|h| h.clock).fold(0.0_f32, f32::max);
-
-    // Real start when entity defs captured BattleLogic.battleStage; otherwise
-    // the 30.94s heuristic that matches Random/Co-op/Ranked/Brawl countdowns.
     let battle_start_clock_exact = battle_start_clock.is_some();
     let battle_start_clock_s = battle_start_clock.unwrap_or(30.94_f32);
     let severity = classify_severity(&spikes, battle_start_clock_s);
 
     AnalysisResult {
-        meta: ReplayMetaOut {
-            map: meta.mapName,
-            map_display_name: meta.mapDisplayName,
-            date_time: meta.dateTime,
-            player_name: meta.playerName,
-            player_vehicle: meta.playerVehicle,
-            client_version: meta.clientVersionFromExe,
-            match_group: meta.matchGroup,
-            game_type: meta.gameType,
-            battle_duration_s: meta.battleDuration,
-            replay_duration_s: meta.duration,
-            players_per_team: meta.playersPerTeam,
-            arena_id: arena_id.map(|a| a.to_string()),
-            arena_id_hex: arena_id.map(|a| format!("{:016x}", a as u64)),
-            client_build,
-            region,
-        },
+        meta,
         battle_start_clock_s,
         battle_start_clock_exact,
         samples: samples_out,
@@ -291,14 +220,10 @@ fn classify_severity(spikes: &[Spike], battle_start: f32) -> SeveritySummary {
     let spike_count = spikes.len() as u32;
     let total_stalled_s: f32 = spikes.iter().map(|s| s.gap_seconds).sum();
     let worst = spikes.iter().max_by(|a, b| {
-        a.gap_seconds
-            .partial_cmp(&b.gap_seconds)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        a.gap_seconds.partial_cmp(&b.gap_seconds).unwrap_or(std::cmp::Ordering::Equal)
     });
     let worst_gap_s = worst.map(|s| s.gap_seconds).unwrap_or(0.0);
-    let worst_gap_battle_s = worst
-        .map(|s| s.gap_start_clock - battle_start)
-        .unwrap_or(0.0);
+    let worst_gap_battle_s = worst.map(|s| s.gap_start_clock - battle_start).unwrap_or(0.0);
 
     let severity = if spike_count == 0 {
         Severity::Clean
@@ -333,12 +258,7 @@ fn classify_severity(spikes: &[Spike], battle_start: f32) -> SeveritySummary {
 
 fn compute_ping_stats(samples: &[NetStat]) -> PingStats {
     if samples.is_empty() {
-        return PingStats {
-            min_ms: 0,
-            max_ms: 0,
-            mean_ms: 0.0,
-            p95_ms: 0,
-        };
+        return PingStats { min_ms: 0, max_ms: 0, mean_ms: 0.0, p95_ms: 0 };
     }
     let mut pings: Vec<u16> = samples.iter().map(|s| s.ping).collect();
     pings.sort_unstable();
@@ -348,12 +268,7 @@ fn compute_ping_stats(samples: &[NetStat]) -> PingStats {
     let mean_ms = (sum as f64 / pings.len() as f64) as f32;
     let idx = ((pings.len() as f64) * 0.95).floor() as usize;
     let p95_ms = pings[idx.min(pings.len() - 1)];
-    PingStats {
-        min_ms,
-        max_ms,
-        mean_ms,
-        p95_ms,
-    }
+    PingStats { min_ms, max_ms, mean_ms, p95_ms }
 }
 
 fn detect_spikes(
@@ -371,8 +286,6 @@ fn detect_spikes(
             continue;
         }
 
-        // server_ticks is sorted, so ticks sharing the gap-start clock form a
-        // run ending at idx. Counting it backwards gives the burst size.
         let burst_ticks = server_ticks[..=idx]
             .iter()
             .rev()
@@ -381,7 +294,7 @@ fn detect_spikes(
 
         let client_packets_in_gap = headers
             .iter()
-            .filter(|h| h.clock > prev && h.clock < cur && is_client_side_packet(h.ptype))
+            .filter(|h| h.clock > prev && h.clock < cur && h.is_client_side)
             .count() as u32;
 
         let (peak_ping_ms, peak_ping_clock) = samples
@@ -391,11 +304,7 @@ fn detect_spikes(
             .max_by_key(|(p, _)| *p)
             .unwrap_or((0, prev));
 
-        let client_rate_hz = if gap > 0.0 {
-            client_packets_in_gap as f32 / gap
-        } else {
-            0.0
-        };
+        let client_rate_hz = if gap > 0.0 { client_packets_in_gap as f32 / gap } else { 0.0 };
         let client_present_during_gap = client_rate_hz > 5.0;
 
         spikes.push(Spike {

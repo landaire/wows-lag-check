@@ -3,28 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WoWs Lag Check</title>
+    <title>WG Lag Check</title>
     <link rel="stylesheet" href="./vendor/phosphor/style.css" />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
     <main class="max-w-5xl mx-auto px-4 py-8 space-y-6">
       <header class="space-y-1">
-        <h1 class="text-2xl font-semibold tracking-tight">WoWs Lag Check</h1>
+        <h1 class="text-2xl font-semibold tracking-tight">WG Lag Check</h1>
         <p class="text-slate-400 text-sm">
-          Drop a <code class="text-slate-300">.wowsreplay</code> file to detect ping spikes and server stalls.
-          Everything runs locally in your browser; nothing is uploaded.
+          Find ping spikes in <code class="text-slate-300">.wowsreplay</code> and <code class="text-slate-300">.wotreplay</code> files. Runs locally.
         </p>
       </header>
 
       <section id="dropzone"
         class="border-2 border-dashed border-slate-700 hover:border-sky-500 hover:bg-slate-900 transition rounded-xl px-6 py-10 text-center cursor-pointer"
       >
-        <input id="fileInput" type="file" accept=".wowsreplay" class="hidden" />
+        <input id="fileInput" type="file" accept=".wowsreplay,.wotreplay" class="hidden" />
         <p class="text-slate-300">
-          <span class="text-sky-400 font-medium">Click to select</span> or drop a .wowsreplay file here
+          <span class="text-sky-400 font-medium">Click</span> or drop a replay file
         </p>
-        <p class="text-xs text-slate-500 mt-2">Replays live under <code>replays/</code> in your game install.</p>
+        <p class="text-xs text-slate-500 mt-2">WoT replays work but skip ship/event details.</p>
       </section>
 
       <section id="status" class="hidden">
@@ -49,7 +48,7 @@
             </button>
             <div id="copyPopover"
               class="hidden absolute right-0 mt-2 w-72 z-10 rounded-lg border border-amber-700 bg-amber-950/95 text-amber-100 text-xs leading-relaxed px-3 py-2 shadow-lg">
-              Don't forget to attach the .wowsreplay file when you post.
+              Attach the replay file too.
             </div>
           </div>
         </div>
@@ -60,7 +59,7 @@
             <p id="spikesNote" class="text-xs text-slate-500"></p>
           </div>
           <div class="flex items-center gap-3 text-xs text-slate-400">
-            <label for="thresholdSlider" class="shrink-0">Spike threshold</label>
+            <label for="thresholdSlider" class="shrink-0">Threshold</label>
             <input
               id="thresholdSlider"
               type="range"
@@ -95,15 +94,6 @@
               <tbody id="spikeRows" class="divide-y divide-slate-800"></tbody>
             </table>
           </div>
-          <p class="text-xs text-slate-500 leading-relaxed">
-            Battle time comes from the in-game BattleLogic.battleStage signal when entity
-            definitions are loaded; otherwise it assumes a 30s pre-battle countdown
-            (Random, Co-op, Ranked, Brawl).
-            Stall type is classified by the rate of client-only packets
-            (Camera + GunMarker + PlayerNetStats, ~30 Hz combined) seen inside the gap:
-            <span class="text-orange-300">server-only</span> means client packets kept flowing,
-            <span class="text-violet-300">client+server</span> means the client froze too.
-          </p>
         </div>
 
         <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-3">
@@ -118,33 +108,33 @@
           <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-300">
             <span class="inline-flex items-center gap-1.5"><span class="inline-block w-4 h-0.5 bg-sky-400"></span>ping (ms)</span>
             <span class="inline-flex items-center gap-1.5"><span class="inline-block w-4 h-0.5 bg-slate-500"></span>fps (0-144)</span>
-            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-orange-400/40 border border-orange-400/65"></span>server-only stall</span>
-            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-violet-400/45 border border-violet-400/85"></span>client+server stall</span>
-            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-4 border-t border-dashed border-slate-500"></span>battle start (20:00)</span>
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-orange-400/40 border border-orange-400/65"></span>server-only</span>
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm bg-violet-400/45 border border-violet-400/85"></span>client+server</span>
+            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-4 border-t border-dashed border-slate-500"></span>battle start</span>
           </div>
           <div id="chartWrap" class="overflow-x-auto"></div>
         </div>
 
         <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-3 text-sm text-slate-300">
-          <h2 class="text-sm font-medium">How this works</h2>
-          <dl class="grid sm:grid-cols-[max-content_1fr] gap-x-4 gap-y-2 leading-relaxed">
+          <h2 class="text-sm font-medium">Glossary</h2>
+          <dl class="grid sm:grid-cols-[max-content_1fr] gap-x-4 gap-y-2">
             <dt class="text-slate-400">Gap</dt>
-            <dd>Duration of the lag spike itself: the time between two consecutive ServerTick packets (the game's "your client got an update" signal, normally fired ~7 times per second). Gaps at or above the slider threshold (default 500 ms; adjustable down to 100 ms for a noisier view) are flagged as spikes.</dd>
+            <dd>Time between consecutive server ticks. Above the threshold = spike.</dd>
 
             <dt class="text-slate-400">Since prev</dt>
-            <dd>Quiet replay-clock time between the end of the previous spike and the start of this one, formatted as <code>MM:SS:mmm</code> (zero-padded minutes, seconds, and milliseconds). Blank for the first spike. The same intervals are annotated on the chart between adjacent spike bands when there is room for the label.</dd>
+            <dd>Quiet time since the last spike (<code>MM:SS:mmm</code>).</dd>
 
             <dt class="text-slate-400">Peak ping</dt>
-            <dd>Highest ping value reported by the client (via PlayerNetStats, ~10 Hz) during the gap window plus a 2-second tail to catch the RTT estimate catching up after the stall ends.</dd>
+            <dd>Highest ping in the gap window plus a 2s tail.</dd>
 
-            <dt class="text-slate-400">Server-only stall</dt>
-            <dd>The client was alive throughout: local-only packets (Camera, GunMarker, PlayerNetStats; ~30 Hz combined) kept landing in the replay while server-driven packets stopped. The server (or the network between you and it) was the problem.</dd>
+            <dt class="text-slate-400">Server-only</dt>
+            <dd>Client packets kept flowing during the gap; server stalled.</dd>
 
-            <dt class="text-slate-400">Client+server stall</dt>
-            <dd>Even the client's local packets dried up inside the gap. Either the client froze for unrelated reasons, or a long server stall blocked the network thread to the point the client couldn't tick. Classified by client packet rate &lt;= 5 Hz inside the gap.</dd>
+            <dt class="text-slate-400">Client+server</dt>
+            <dd>Client packets dried up too. Full freeze.</dd>
 
             <dt class="text-slate-400">Battle time</dt>
-            <dd>Replay clock minus the moment the match starts. Exact when entity defs load and the BattleLogic.battleStage signal is captured; otherwise approximated as replay clock minus 30 s (the standard pre-battle countdown for Random / Co-op / Ranked / Brawl; Operations and Scenarios differ), and the column header is annotated with "(approx)".</dd>
+            <dd>Clock relative to match start. Exact with entity defs, otherwise approximated (30s countdown).</dd>
           </dl>
         </div>
 
