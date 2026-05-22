@@ -49,8 +49,8 @@ pub struct EventShip {
 }
 
 /// An in-game event giving context to a spike. `kind` is one of "consumable",
-/// "kill", "spotted". `ships` lists the ships involved — spotted: [ship];
-/// kill: [victim, killer]; consumable: [user] — and the display sentence is
+/// "kill", "spotted". `ships` lists the ships involved (spotted: [ship];
+/// kill: [victim, killer]; consumable: [user]); the display sentence is
 /// composed from these fields by the UI/Discord layer.
 #[derive(Debug, Clone, Serialize)]
 pub struct GameEvent {
@@ -121,9 +121,13 @@ pub struct SeveritySummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisResult {
     pub meta: ReplayMetaOut,
-    /// Replay-clock seconds at which the battle timer reads 20:00. 30s pre-battle
-    /// countdown for Random/Co-op/Ranked/Brawl; Operations differs.
-    pub battle_start_clock_approx_s: f32,
+    /// Replay-clock seconds at which the battle timer reads 20:00. Exact when
+    /// the BattleLogic `battleStage` property is captured (requires entity defs);
+    /// otherwise a 30.94s fallback that matches Random/Co-op/Ranked/Brawl.
+    pub battle_start_clock_s: f32,
+    /// True when `battle_start_clock_s` came from the BattleLogic.battleStage
+    /// signal, false when it's the 30.94s fallback.
+    pub battle_start_clock_exact: bool,
     pub samples: Vec<PingSample>,
     pub server_tick_clocks: Vec<f32>,
     pub spikes: Vec<Spike>,
@@ -137,6 +141,11 @@ pub struct AnalysisResult {
     pub entity_defs_loaded: bool,
     /// True when the GameParams blob loaded, so ship and camo names resolve.
     pub game_params_loaded: bool,
+    /// Approximate clocks (in replay seconds) of packets dropped during
+    /// parsing for having a corrupt clock. Each entry uses the last valid
+    /// clock seen before the corrupt packet, since the corrupt one's own
+    /// clock is garbage. The count is `.len()`.
+    pub corrupt_packet_clocks: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,6 +184,8 @@ pub fn build_analysis(
     region: Option<&'static str>,
     entity_defs_loaded: bool,
     game_params_loaded: bool,
+    battle_start_clock: Option<f32>,
+    corrupt_packet_clocks: Vec<f32>,
     thresholds: SpikeThresholds,
 ) -> AnalysisResult {
     let samples_out: Vec<PingSample> = samples
@@ -219,8 +230,11 @@ pub fn build_analysis(
         .map(|h| h.clock)
         .fold(0.0_f32, f32::max);
 
-    let battle_start_clock_approx_s = 30.94_f32;
-    let severity = classify_severity(&spikes, battle_start_clock_approx_s);
+    // Real start when entity defs captured BattleLogic.battleStage; otherwise
+    // the 30.94s heuristic that matches Random/Co-op/Ranked/Brawl countdowns.
+    let battle_start_clock_exact = battle_start_clock.is_some();
+    let battle_start_clock_s = battle_start_clock.unwrap_or(30.94_f32);
+    let severity = classify_severity(&spikes, battle_start_clock_s);
 
     AnalysisResult {
         meta: ReplayMetaOut {
@@ -240,7 +254,8 @@ pub fn build_analysis(
             client_build,
             region: region.map(|r| r.to_string()),
         },
-        battle_start_clock_approx_s,
+        battle_start_clock_s,
+        battle_start_clock_exact,
         samples: samples_out,
         server_tick_clocks: server_ticks.clone(),
         spikes,
@@ -251,6 +266,7 @@ pub fn build_analysis(
         severity,
         entity_defs_loaded,
         game_params_loaded,
+        corrupt_packet_clocks,
     }
 }
 

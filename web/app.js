@@ -17,6 +17,7 @@ const metaList = document.getElementById("metaList");
 const pingStats = document.getElementById("pingStats");
 const chartWrap = document.getElementById("chartWrap");
 const spikeRows = document.getElementById("spikeRows");
+const battleTimeHeader = document.getElementById("battleTimeHeader");
 const spikesNote = document.getElementById("spikesNote");
 const spikesCard = document.getElementById("spikesCard");
 const spikeShips = document.getElementById("spikeShips");
@@ -229,7 +230,7 @@ async function handleFile(file) {
     setStatus("error", `"${file.name}" doesn't look like a .wowsreplay file.`);
     return;
   }
-  showLoading("Reading your replay…", file.name, null);
+  showLoading("Reading your replay...", file.name, null);
   resultSection.classList.add("hidden");
 
   try {
@@ -244,9 +245,9 @@ async function handleFile(file) {
       try {
         defsBundle = await fetchEntityDefs(info.dir_name, (done, total) => {
           showLoading(
-            "Hauling in game data…",
-            total ? `${info.dir_name} — ship definitions, file ${done} of ${total}`
-                  : `${info.dir_name} — listing ship definitions…`,
+            "Hauling in game data...",
+            total ? `${info.dir_name}: ship definitions, file ${done} of ${total}`
+                  : `${info.dir_name}: listing ship definitions...`,
             total ? (done / total) * 100 : null,
           );
         });
@@ -257,7 +258,7 @@ async function handleFile(file) {
         const gd = await fetchGameData(info.dir_name, (path, loaded, total) => {
           const mb = (loaded / 1024 / 1024).toFixed(1);
           showLoading(
-            "Hauling in game data…",
+            "Hauling in game data...",
             `${path}  (${mb} MB)`,
             total ? (loaded / total) * 100 : null,
           );
@@ -269,7 +270,7 @@ async function handleFile(file) {
       }
     }
 
-    showLoading("Hunting for lag spikes…", "Crunching the replay — this can take a few seconds.", null);
+    showLoading("Hunting for lag spikes...", "Crunching the replay. This can take a few seconds.", null);
     // Let the browser paint the spinner before the synchronous WASM call.
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
 
@@ -279,7 +280,14 @@ async function handleFile(file) {
     let dataNote = "";
     if (!result.entity_defs_loaded) dataNote = " (entity defs unavailable)";
     else if (!result.game_params_loaded) dataNote = " (ship names unavailable)";
-    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} ping samples, ${result.server_ticks_total} server ticks, ${result.spikes.length} spikes.${dataNote}`);
+    const corruptClocks = result.corrupt_packet_clocks ?? [];
+    let corruptNote = "";
+    if (corruptClocks.length === 1) {
+      corruptNote = ` Skipped 1 packet with a corrupt clock at ~${Math.round(corruptClocks[0])}s.`;
+    } else if (corruptClocks.length > 1) {
+      corruptNote = ` Skipped ${corruptClocks.length} packets with corrupt clocks (first at ~${Math.round(corruptClocks[0])}s).`;
+    }
+    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} ping samples, ${result.server_ticks_total} server ticks, ${result.spikes.length} spikes.${dataNote}${corruptNote}`);
     lastResult = result;
     renderResult(result);
   } catch (err) {
@@ -451,6 +459,7 @@ function renderResult(r) {
   severitySub.textContent = style.sub;
   severityHeadline.textContent = sev.headline;
 
+  battleTimeHeader.textContent = r.battle_start_clock_exact ? "Battle time" : "Battle time (approx)";
   render(spikeRowsTemplate(r), spikeRows);
   spikesNote.textContent = r.spikes.length
     ? `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= 500 ms`
@@ -513,7 +522,7 @@ function spikeRow(s, r) {
   const mainRow = html`
     <tr class="hover:bg-slate-800/50 border-t border-slate-800">
       <td class="py-2 pr-3 font-mono text-slate-300">${fmtClock(s.gap_start_clock)}</td>
-      <td class="py-2 pr-3 font-mono text-slate-300">${fmtBattleClock(s.gap_start_clock, r.battle_start_clock_approx_s)}</td>
+      <td class="py-2 pr-3 font-mono text-slate-300">${fmtBattleClock(s.gap_start_clock, r.battle_start_clock_s)}</td>
       <td class="py-2 pr-3 text-right font-mono ${gapClass}">${(s.gap_seconds * 1000).toFixed(0)} ms</td>
       <td class="py-2 pr-3 text-right font-mono text-slate-200">${s.peak_ping_ms} ms</td>
       <td class="py-2 pr-3">
@@ -560,9 +569,9 @@ function composeEvent(e) {
   return [t(e.kind)];
 }
 
-/// One preceding-event line: time/tick offset, a kind-colored dot, and the
-/// event sentence with player names only — ids, ships, and camo move to the
-/// ship table below. Each player name is a chip linked to its table row.
+/// One preceding-event line: time/tick offset, a kind icon, and the event
+/// sentence with player names only. Ids, ships, and camo move to the ship
+/// table below; each player name is a chip linked to its table row.
 function eventLine(s, e) {
   const dt = (s.gap_start_clock - e.clock).toFixed(2);
   const kind = KIND_ICON[e.kind] ?? { icon: "ph-circle", color: "text-slate-400" };
@@ -653,7 +662,7 @@ ${arenaLine}
     body += `battle  gap     peak   type\n`;
     body += `------  ------  -----  --------------\n`;
     for (const s of r.spikes) {
-      const bt = fmtClockShort(Math.max(0, s.gap_start_clock - r.battle_start_clock_approx_s));
+      const bt = fmtClockShort(Math.max(0, s.gap_start_clock - r.battle_start_clock_s));
       const gap = `${(s.gap_seconds * 1000).toFixed(0)}ms`.padStart(6);
       const peak = `${s.peak_ping_ms}ms`.padStart(5);
       const type = s.client_present_during_gap ? "server-only" : "client+server";
@@ -743,7 +752,7 @@ function renderChart(r) {
     return `<rect x="${xs}" y="${pad.t}" width="${w}" height="${innerH}" fill="${fill}" stroke="${stroke}" stroke-width="1"/>`;
   }).join("");
 
-  const bx = x(r.battle_start_clock_approx_s);
+  const bx = x(r.battle_start_clock_s);
   const battleMarker = `
     <line x1="${bx}" x2="${bx}" y1="${pad.t}" y2="${pad.t + innerH}" stroke="#475569" stroke-width="1" stroke-dasharray="3 3"/>
     <text x="${bx + 4}" y="${pad.t + 12}" fill="#94a3b8" font-size="10">battle 0:00</text>

@@ -22,6 +22,11 @@ use wowsunpack::rpc::typedefs::ArgValue;
 
 use analysis::GameEvent;
 
+/// Packets whose clock falls outside this range carry a corrupt timestamp.
+/// Some replays contain garbage f32 clock values (e.g. 1e32); such packets
+/// are skipped during parsing so they can't poison durations or the chart.
+const MAX_REPLAY_CLOCK_S: f32 = 86_400.0;
+
 #[wasm_bindgen(start)]
 pub fn _start() {
     #[cfg(feature = "console_error_panic_hook")]
@@ -81,6 +86,8 @@ pub fn run_analysis(
     let mut headers = Vec::new();
     let mut events: Vec<GameEvent> = Vec::new();
     let mut arena_id: Option<i64> = None;
+    let mut battle_start_clock: Option<f32> = None;
+    let mut corrupt_packet_clocks: Vec<f32> = Vec::new();
 
     match &specs {
         Some(specs) => decode_with_specs(
@@ -92,11 +99,19 @@ pub fn run_analysis(
             &mut headers,
             &mut events,
             &mut arena_id,
+            &mut battle_start_clock,
+            &mut corrupt_packet_clocks,
         )?,
         None => {
+            let mut last_valid_clock: f32 = 0.0;
             for packet in RawPacketIterator::new(&replay.packet_data) {
                 let packet = packet.map_err(|e| format!("packet parse: {e:?}"))?;
                 let clock = packet.clock.seconds();
+                if !(0.0..MAX_REPLAY_CLOCK_S).contains(&clock) {
+                    corrupt_packet_clocks.push(last_valid_clock);
+                    continue;
+                }
+                last_valid_clock = clock;
                 headers.push(analysis::PacketHeader { clock, ptype: packet.packet_type });
                 match packet.packet_type {
                     PacketTypeId::PlayerNetStats => {
@@ -122,6 +137,8 @@ pub fn run_analysis(
         region,
         specs.is_some(),
         resolver.loaded(),
+        battle_start_clock,
+        corrupt_packet_clocks,
         analysis::SpikeThresholds::default(),
     ))
 }
@@ -138,6 +155,8 @@ fn decode_with_specs(
     headers: &mut Vec<analysis::PacketHeader>,
     events: &mut Vec<GameEvent>,
     arena_id: &mut Option<i64>,
+    battle_start_clock: &mut Option<f32>,
+    corrupt_packet_clocks: &mut Vec<f32>,
 ) -> Result<(), String> {
     let version = Version::from_client_exe(&replay.meta.clientVersionFromExe);
     let game_constants = GameConstants::defaults();
@@ -161,11 +180,17 @@ fn decode_with_specs(
 
     let mut parser = Parser::new(specs);
     let mut remaining = &replay.packet_data[..];
+    let mut last_valid_clock: f32 = 0.0;
     while !remaining.is_empty() {
         let packet = parser
             .parse_packet(&mut remaining)
             .map_err(|e| format!("packet parse: {e:?}"))?;
         let clock = packet.clock.seconds();
+        if !(0.0..MAX_REPLAY_CLOCK_S).contains(&clock) {
+            corrupt_packet_clocks.push(last_valid_clock);
+            continue;
+        }
+        last_valid_clock = clock;
         headers.push(analysis::PacketHeader { clock, ptype: packet.packet_type });
 
         let decoded = decoder.decode(&packet);
@@ -221,6 +246,14 @@ fn decode_with_specs(
                     detail: death_cause_name(cause),
                     death_effect: death_effects.get(killer).map(|e| e.to_string()),
                 });
+            }
+            DecodedPacketPayload::EntityProperty(ep) if ep.property == "battleStage" => {
+                // BattleLogic.battleStage: raw 0 == BattleStage::Waiting, which is
+                // the moment the pre-battle countdown ends and the match starts.
+                // (See wows_replays BattleController for the same logic.)
+                if battle_start_clock.is_none() && ep.value.as_i32() == Some(0) {
+                    *battle_start_clock = Some(clock);
+                }
             }
             DecodedPacketPayload::EntityProperty(ep) if ep.property == "visibilityFlags" => {
                 let new = ep.value.as_i32().unwrap_or(0);

@@ -33,14 +33,26 @@ fn main() {
         _ => println!("Arena ID: (not found)"),
     }
     println!("Server:   {}", result.meta.region.as_deref().unwrap_or("(unknown)"));
+    println!("Battle start clock: {:.3}s", result.battle_start_clock_s);
     println!("Severity: {:?} ({})", result.severity.severity, result.severity.headline);
     println!();
     println!("PlayerNetStats samples: {}", result.samples_total);
     println!("ServerTick packets:    {}", result.server_ticks_total);
+    println!("Replay duration:       {}s", result.replay_duration_s);
+    if result.corrupt_packet_clocks.is_empty() {
+        println!("Corrupt-clock packets: 0");
+    } else {
+        let cs: Vec<String> = result.corrupt_packet_clocks.iter().map(|c| format!("{c:.1}s")).collect();
+        println!(
+            "Corrupt-clock packets: {} (at {})",
+            result.corrupt_packet_clocks.len(),
+            cs.join(", "),
+        );
+    }
     println!();
     println!("=== {} spikes (gap >= 500ms) ===", result.spikes.len());
     for s in &result.spikes {
-        let bt = (s.gap_start_clock - result.battle_start_clock_approx_s).max(0.0);
+        let bt = (s.gap_start_clock - result.battle_start_clock_s).max(0.0);
         let kind = if s.client_present_during_gap { "server-only" } else { "client+server" };
         let burst = if s.burst_ticks > 1 {
             format!("  burst {} ticks", s.burst_ticks)

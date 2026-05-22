@@ -65,7 +65,7 @@
               <thead class="text-slate-400 text-xs uppercase tracking-wider border-b border-slate-800">
                 <tr>
                   <th class="text-left py-2 pr-3 font-medium">Replay clock</th>
-                  <th class="text-left py-2 pr-3 font-medium">Battle time (approx)</th>
+                  <th id="battleTimeHeader" class="text-left py-2 pr-3 font-medium">Battle time</th>
                   <th class="text-right py-2 pr-3 font-medium">Gap</th>
                   <th class="text-right py-2 pr-3 font-medium">Peak ping</th>
                   <th class="text-left py-2 pr-3 font-medium">Stall type</th>
@@ -76,7 +76,9 @@
             </table>
           </div>
           <p class="text-xs text-slate-500 leading-relaxed">
-            Battle time assumes a 30s pre-battle countdown (Random, Co-op, Ranked, Brawl).
+            Battle time comes from the in-game BattleLogic.battleStage signal when entity
+            definitions are loaded; otherwise it assumes a 30s pre-battle countdown
+            (Random, Co-op, Ranked, Brawl).
             Stall type is classified by the rate of client-only packets
             (Camera + GunMarker + PlayerNetStats, ~30 Hz combined) seen inside the gap:
             <span class="text-orange-300">server-only</span> means client packets kept flowing,
@@ -119,7 +121,7 @@
             <dd>Even the client's local packets dried up inside the gap. Either the client froze for unrelated reasons, or a long server stall blocked the network thread to the point the client couldn't tick. Classified by client packet rate &lt;= 5 Hz inside the gap.</dd>
 
             <dt class="text-slate-400">Battle time</dt>
-            <dd>Replay clock minus 30 s (the standard pre-battle countdown for Random / Co-op / Ranked / Brawl). Approximate; Operations and Scenarios use different countdowns.</dd>
+            <dd>Replay clock minus the moment the match starts. Exact when entity defs load and the BattleLogic.battleStage signal is captured; otherwise approximated as replay clock minus 30 s (the standard pre-battle countdown for Random / Co-op / Ranked / Brawl; Operations and Scenarios differ), and the column header is annotated with "(approx)".</dd>
           </dl>
         </div>
 
