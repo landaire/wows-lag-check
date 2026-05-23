@@ -18,8 +18,12 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        # minimal (rustc + cargo + rust-std) keeps CI lean — the default profile
+        # pulls rust-docs (~140 MiB) on every fresh runner. clippy and rustfmt
+        # are tiny extensions that the dev shell still wants.
+        rustToolchain = pkgs.rust-bin.stable.latest.minimal.override {
           targets = [ "wasm32-unknown-unknown" ];
+          extensions = [ "clippy" "rustfmt" ];
         };
 
         # Need Tailwind v4 syntax. tailwindcss_4 if available, else fall through.

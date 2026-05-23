@@ -181,6 +181,7 @@ pub struct PacketHeader {
     pub is_client_side: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_analysis(
     meta: ReplayMetaOut,
     samples: Vec<NetStat>,
