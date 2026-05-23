@@ -21,13 +21,16 @@ const WOT_BLOWFISH_KEY: [u8; 16] = [
     0xDE, 0x72, 0xBE, 0xA0, 0xDE, 0x04, 0xBE, 0xB1, 0xDE, 0xFE, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
 ];
 
-/// WoT packet ids we care about. Other ids are walked but discarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PacketKind {
     /// 4-byte (fps:8, ping:16, lag:1) at 10Hz.
     PlayerNetStats,
     /// 72-byte tick with monotonic counter at offset 12, 10Hz.
     ServerTick,
+    /// Client-driven packets (camera, gun marker, gun rotation) that fire on a
+    /// local timer regardless of server state. Used to distinguish a
+    /// server-only stall from a full client freeze.
+    ClientSide,
     Other,
 }
 
@@ -36,8 +39,16 @@ impl PacketKind {
         match raw {
             0x1f => Self::PlayerNetStats,
             0x39 => Self::ServerTick,
+            // 0x1a (60B camera), 0x26 (40B gun marker), and 0x1c/0x1d (gun
+            // yaw/pitch floats) all co-fire on the 10Hz client timer with
+            // PlayerNetStats and stop together when the client freezes.
+            0x1a | 0x1c | 0x1d | 0x26 => Self::ClientSide,
             _ => Self::Other,
         }
+    }
+
+    fn is_client_side(self) -> bool {
+        matches!(self, Self::PlayerNetStats | Self::ClientSide)
     }
 }
 
@@ -158,7 +169,9 @@ impl<'a> Container<'a> {
         let decrypted = cipher.decrypt(self.encrypted);
         let mut inflater = flate2::read::ZlibDecoder::new(decrypted.as_slice());
         let mut packet_data = Vec::new();
-        inflater.read_to_end(&mut packet_data).map_err(|e| format!("wot inflate: {e}"))?;
+        inflater
+            .read_to_end(&mut packet_data)
+            .map_err(|e| format!("wot inflate: {e}"))?;
         Ok(packet_data)
     }
 }
@@ -172,8 +185,12 @@ struct PlaintextFeedbackCipher {
 
 impl PlaintextFeedbackCipher {
     fn new(key: &[u8; 16]) -> Result<Self, String> {
-        let cipher = <Blowfish<BE>>::new_from_slice(key).map_err(|e| format!("blowfish key: {e}"))?;
-        Ok(Self { cipher, previous: [0u8; 8] })
+        let cipher =
+            <Blowfish<BE>>::new_from_slice(key).map_err(|e| format!("blowfish key: {e}"))?;
+        Ok(Self {
+            cipher,
+            previous: [0u8; 8],
+        })
     }
 
     fn decrypt(&mut self, encrypted: &[u8]) -> Vec<u8> {
@@ -211,8 +228,12 @@ impl WotDecoder {
                 continue;
             }
             last_valid_clock = clock;
-            self.headers.push(analysis::PacketHeader { clock, is_client_side: false });
-            match PacketKind::from_raw(packet.packet_type) {
+            let kind = PacketKind::from_raw(packet.packet_type);
+            self.headers.push(analysis::PacketHeader {
+                clock,
+                is_client_side: kind.is_client_side(),
+            });
+            match kind {
                 PacketKind::PlayerNetStats => {
                     if let Some(ns) = NetStats::from_payload(packet.payload) {
                         self.samples.push(analysis::NetStat {
@@ -224,7 +245,7 @@ impl WotDecoder {
                     }
                 }
                 PacketKind::ServerTick => self.tick_clocks.push(clock),
-                PacketKind::Other => {}
+                PacketKind::ClientSide | PacketKind::Other => {}
             }
         }
         Ok(())
@@ -242,7 +263,9 @@ impl WotDecoder {
             None,
             self.corrupt_packet_clocks,
             threshold_ms
-                .map(|ms| analysis::SpikeThresholds { min_gap_s: ms as f32 / 1000.0 })
+                .map(|ms| analysis::SpikeThresholds {
+                    min_gap_s: ms as f32 / 1000.0,
+                })
                 .unwrap_or_default(),
         )
     }
@@ -299,7 +322,10 @@ impl<'a> Iterator for PacketIterator<'a> {
         }
         if self.remaining.len() < 12 {
             let truncated = std::mem::take(&mut self.remaining);
-            return Some(Err(format!("truncated wot packet header: {} bytes", truncated.len())));
+            return Some(Err(format!(
+                "truncated wot packet header: {} bytes",
+                truncated.len()
+            )));
         }
         let size = u32::from_le_bytes(self.remaining[0..4].try_into().unwrap()) as usize;
         let packet_type = u32::from_le_bytes(self.remaining[4..8].try_into().unwrap());
@@ -311,7 +337,11 @@ impl<'a> Iterator for PacketIterator<'a> {
         }
         let payload = &self.remaining[12..total];
         self.remaining = &self.remaining[total..];
-        Some(Ok(RawPacket { packet_type, clock, payload }))
+        Some(Ok(RawPacket {
+            packet_type,
+            clock,
+            payload,
+        }))
     }
 }
 

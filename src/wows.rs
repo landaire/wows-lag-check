@@ -159,7 +159,9 @@ impl<'a> WowsDecoder<'a> {
         let mut remaining = &self.replay.packet_data[..];
         let mut last_valid_clock: f32 = 0.0;
         while !remaining.is_empty() {
-            let packet = parser.parse_packet(&mut remaining).map_err(|e| format!("packet parse: {e:?}"))?;
+            let packet = parser
+                .parse_packet(&mut remaining)
+                .map_err(|e| format!("packet parse: {e:?}"))?;
             let clock = packet.clock.seconds();
             if !(0.0..MAX_REPLAY_CLOCK_S).contains(&clock) {
                 self.corrupt_packet_clocks.push(last_valid_clock);
@@ -177,11 +179,21 @@ impl<'a> WowsDecoder<'a> {
         Ok(())
     }
 
-    fn handle_decoded(&mut self, version: &Version, clock: f32, payload: &DecodedPacketPayload<'_, '_, '_>) {
+    fn handle_decoded(
+        &mut self,
+        version: &Version,
+        clock: f32,
+        payload: &DecodedPacketPayload<'_, '_, '_>,
+    ) {
         match payload {
             DecodedPacketPayload::PlayerNetStats(ns) => self.samples.push(net_stat(clock, ns)),
             DecodedPacketPayload::ServerTick(_) => self.server_ticks.push(clock),
-            DecodedPacketPayload::OnArenaStateReceived { arena_id, player_states, bot_states, .. } => {
+            DecodedPacketPayload::OnArenaStateReceived {
+                arena_id,
+                player_states,
+                bot_states,
+                ..
+            } => {
                 if self.arena_id.is_none() {
                     self.arena_id = Some(*arena_id);
                 }
@@ -206,9 +218,15 @@ impl<'a> WowsDecoder<'a> {
                     );
                 }
             }
-            DecodedPacketPayload::EntityCreate(ec) => self.index_ship_config(version, &ec.props, ec.entity_id),
-            DecodedPacketPayload::CellPlayerCreate(cpc) => self.index_ship_config(version, &cpc.props, cpc.entity_id),
-            DecodedPacketPayload::Consumable { entity, consumable, .. } => {
+            DecodedPacketPayload::EntityCreate(ec) => {
+                self.index_ship_config(version, &ec.props, ec.entity_id)
+            }
+            DecodedPacketPayload::CellPlayerCreate(cpc) => {
+                self.index_ship_config(version, &cpc.props, cpc.entity_id)
+            }
+            DecodedPacketPayload::Consumable {
+                entity, consumable, ..
+            } => {
                 let ship = event_ship(&self.ships, &self.camos, *entity);
                 self.events.push(GameEvent {
                     clock,
@@ -219,7 +237,11 @@ impl<'a> WowsDecoder<'a> {
                     death_effect: None,
                 });
             }
-            DecodedPacketPayload::ShipDestroyed { killer, victim, cause } => {
+            DecodedPacketPayload::ShipDestroyed {
+                killer,
+                victim,
+                cause,
+            } => {
                 let victim_ship = event_ship(&self.ships, &self.camos, *victim);
                 let killer_ship = event_ship(&self.ships, &self.camos, *killer);
                 self.events.push(GameEvent {
@@ -269,13 +291,16 @@ impl<'a> WowsDecoder<'a> {
         let Ok(config) = parse_ship_config(blob, version) else {
             return;
         };
-        let effect = self.resolver.death_effect_name(config.exteriors()).or_else(|| {
-            config
-                .exteriors()
-                .iter()
-                .find_map(|id| replay::death_effect_name(id.raw()))
-                .map(str::to_string)
-        });
+        let effect = self
+            .resolver
+            .death_effect_name(config.exteriors())
+            .or_else(|| {
+                config
+                    .exteriors()
+                    .iter()
+                    .find_map(|id| replay::death_effect_name(id.raw()))
+                    .map(str::to_string)
+            });
         if let Some(effect) = effect {
             self.death_effects.insert(entity_id, effect);
         }
@@ -284,7 +309,11 @@ impl<'a> WowsDecoder<'a> {
         }
     }
 
-    fn finish(self, entity_defs_loaded: bool, threshold_ms: Option<u32>) -> analysis::AnalysisResult {
+    fn finish(
+        self,
+        entity_defs_loaded: bool,
+        threshold_ms: Option<u32>,
+    ) -> analysis::AnalysisResult {
         let build = replay::build_from_client_version(&self.replay.meta.clientVersionFromExe);
         let meta = meta_out(&self.replay.meta, self.arena_id, build, self.realm.clone());
         analysis::build_analysis(
@@ -298,7 +327,9 @@ impl<'a> WowsDecoder<'a> {
             self.battle_start_clock,
             self.corrupt_packet_clocks,
             threshold_ms
-                .map(|ms| analysis::SpikeThresholds { min_gap_s: ms as f32 / 1000.0 })
+                .map(|ms| analysis::SpikeThresholds {
+                    min_gap_s: ms as f32 / 1000.0,
+                })
                 .unwrap_or_default(),
         )
     }
@@ -330,7 +361,12 @@ fn meta_out(
 }
 
 fn net_stat(clock: f32, ns: &PlayerNetStatsPacket) -> analysis::NetStat {
-    analysis::NetStat { clock, fps: ns.fps, ping: ns.ping, is_lagging: ns.is_lagging }
+    analysis::NetStat {
+        clock,
+        fps: ns.fps,
+        ping: ns.ping,
+        is_lagging: ns.is_lagging,
+    }
 }
 
 struct ShipInfo {
@@ -358,14 +394,18 @@ fn event_ship(
     }
 }
 
-fn consumable_name(c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::Consumable>) -> String {
+fn consumable_name(
+    c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::Consumable>,
+) -> String {
     match c.known() {
         Some(known) => format!("{known:?}"),
         None => "Consumable".to_string(),
     }
 }
 
-fn death_cause_name(c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::DeathCause>) -> String {
+fn death_cause_name(
+    c: &wowsunpack::recognized::Recognized<wowsunpack::game_types::DeathCause>,
+) -> String {
     match c.known() {
         Some(known) => format!("{known:?}"),
         None => "unknown".to_string(),
@@ -402,7 +442,11 @@ impl NameResolver {
                 .unwrap_or_default()
         };
         let mo_bytes = inflate_if_zstd(translations);
-        let catalog = if mo_bytes.is_empty() { None } else { Catalog::parse(&mo_bytes[..]).ok() };
+        let catalog = if mo_bytes.is_empty() {
+            None
+        } else {
+            Catalog::parse(&mo_bytes[..]).ok()
+        };
         Self { by_id, catalog }
     }
 
@@ -413,7 +457,11 @@ impl NameResolver {
     fn translate(&self, key: &str) -> Option<String> {
         let catalog = self.catalog.as_ref()?;
         let value = catalog.gettext(key);
-        if value == key { None } else { Some(value.to_string()) }
+        if value == key {
+            None
+        } else {
+            Some(value.to_string())
+        }
     }
 
     fn ship_name(&self, id: GameParamId) -> Option<String> {
@@ -423,7 +471,9 @@ impl NameResolver {
 
     fn camo_name(&self, exteriors: &[GameParamId]) -> Option<String> {
         for id in exteriors {
-            let Some(param) = self.by_id.get(id) else { continue };
+            let Some(param) = self.by_id.get(id) else {
+                continue;
+            };
             let is_camo = matches!(
                 param.species().and_then(|s| s.known()),
                 Some(Species::Permoflage | Species::Camouflage | Species::Skin | Species::MSkin)
@@ -439,7 +489,9 @@ impl NameResolver {
 
     fn death_effect_name(&self, exteriors: &[GameParamId]) -> Option<String> {
         for id in exteriors {
-            let Some(param) = self.by_id.get(id) else { continue };
+            let Some(param) = self.by_id.get(id) else {
+                continue;
+            };
             let is_death_effect = param
                 .species()
                 .and_then(|s| s.unknown())
@@ -465,7 +517,11 @@ fn load_entity_specs(defs_bundle: &[u8]) -> Result<Option<Vec<EntitySpec>>, Stri
         files
             .get(path)
             .map(|v| Cow::Owned(v.clone()))
-            .ok_or_else(|| GameDataError::Io(std::io::Error::other(format!("missing bundled file: {path}"))))
+            .ok_or_else(|| {
+                GameDataError::Io(std::io::Error::other(format!(
+                    "missing bundled file: {path}"
+                )))
+            })
     });
     let specs = parse_scripts(&loader).map_err(|e| format!("entity defs: {e}"))?;
     Ok(Some(specs))

@@ -26,7 +26,12 @@ struct ReplayInfoOut {
 pub fn replay_info(bytes: &[u8]) -> Result<JsValue, JsError> {
     let out = if wot::looks_like_wot(bytes) {
         let info = wot::replay_info(bytes).map_err(|e| JsError::new(&e))?;
-        ReplayInfoOut { game: "wot", client_version: info.client_version, build: None, dir_name: None }
+        ReplayInfoOut {
+            game: "wot",
+            client_version: info.client_version,
+            build: None,
+            dir_name: None,
+        }
     } else {
         let replay = wows_replays::ReplayFile::from_bytes(bytes)
             .map_err(|e| JsError::new(&format!("replay parse: {e}")))?;
