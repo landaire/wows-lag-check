@@ -85,6 +85,11 @@ struct WowsDecoder<'a> {
     resolver: &'a NameResolver,
     samples: Vec<analysis::NetStat>,
     server_ticks: Vec<f32>,
+    /// Clocks of Camera (0x25) packets. Camera, GunMarker, and PlayerNetStats
+    /// all fire in lockstep at 10Hz, but Camera has the most consistent
+    /// presence across observed replays, so we sample only that to keep the
+    /// stream monotone and dedup-free.
+    client_ticks: Vec<f32>,
     headers: Vec<analysis::PacketHeader>,
     events: Vec<GameEvent>,
     arena_id: Option<i64>,
@@ -104,6 +109,7 @@ impl<'a> WowsDecoder<'a> {
             resolver,
             samples: Vec::new(),
             server_ticks: Vec::new(),
+            client_ticks: Vec::new(),
             headers: Vec::new(),
             events: Vec::new(),
             arena_id: None,
@@ -138,6 +144,7 @@ impl<'a> WowsDecoder<'a> {
                     }
                 }
                 PacketTypeId::ServerTick => self.server_ticks.push(clock),
+                PacketTypeId::Camera => self.client_ticks.push(clock),
                 _ => {}
             }
         }
@@ -188,6 +195,7 @@ impl<'a> WowsDecoder<'a> {
         match payload {
             DecodedPacketPayload::PlayerNetStats(ns) => self.samples.push(net_stat(clock, ns)),
             DecodedPacketPayload::ServerTick(_) => self.server_ticks.push(clock),
+            DecodedPacketPayload::Camera(_) => self.client_ticks.push(clock),
             DecodedPacketPayload::OnArenaStateReceived {
                 arena_id,
                 player_states,
@@ -320,6 +328,7 @@ impl<'a> WowsDecoder<'a> {
             meta,
             self.samples,
             self.server_ticks,
+            self.client_ticks,
             self.headers,
             self.events,
             entity_defs_loaded,

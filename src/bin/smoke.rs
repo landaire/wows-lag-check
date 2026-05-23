@@ -51,6 +51,7 @@ fn main() {
     println!();
     println!("PlayerNetStats samples: {}", result.samples_total);
     println!("ServerTick packets:    {}", result.server_ticks_total);
+    println!("Camera packets:        {}", result.client_ticks_total);
     println!("Replay duration:       {}s", result.replay_duration_s);
     if result.corrupt_packet_clocks.is_empty() {
         println!("Corrupt-clock packets: 0");
@@ -67,28 +68,68 @@ fn main() {
         );
     }
     println!();
-    println!("=== {} spikes (gap >= 500ms) ===", result.spikes.len());
-    for s in &result.spikes {
-        let bt = (s.gap_start_clock - result.battle_start_clock_s).max(0.0);
-        let kind = if s.client_present_during_gap {
-            "server-only"
-        } else {
-            "client+server"
+    print_spike_section(
+        "server-tick spikes",
+        &result.spikes,
+        result.battle_start_clock_s,
+        SpikeStream::Server,
+    );
+    println!();
+    print_spike_section(
+        "client-tick spikes (game-thread freezes)",
+        &result.client_spikes,
+        result.battle_start_clock_s,
+        SpikeStream::Client,
+    );
+}
+
+enum SpikeStream {
+    Server,
+    Client,
+}
+
+fn print_spike_section(
+    title: &str,
+    spikes: &[wows_lag_check::analysis::Spike],
+    battle_start: f32,
+    stream: SpikeStream,
+) {
+    println!("=== {} {} (gap >= 500ms) ===", spikes.len(), title);
+    for s in spikes {
+        let bt = (s.gap_start_clock - battle_start).max(0.0);
+        let tag = match stream {
+            SpikeStream::Server => {
+                if s.client_present_during_gap {
+                    "server-only"
+                } else {
+                    "client+server"
+                }
+            }
+            SpikeStream::Client => "client-only freeze",
         };
         let burst = if s.burst_ticks > 1 {
             format!("  burst {} ticks", s.burst_ticks)
         } else {
             String::new()
         };
+        let server_note = if matches!(stream, SpikeStream::Client) && s.server_packets_in_gap > 0 {
+            format!(
+                "  server: {} pkts / {} distinct ({:.1}Hz)",
+                s.server_packets_in_gap, s.server_distinct_clocks_in_gap, s.server_rate_hz,
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "  {:7.3}s gap @ replay {:7.3}s (battle {:02}:{:06.3})  peak {}ms  [{}]{}",
+            "  {:7.3}s gap @ replay {:7.3}s (battle {:02}:{:06.3})  peak {}ms  [{}]{}{}",
             s.gap_seconds,
             s.gap_start_clock,
             (bt as u32) / 60,
             (bt as f64) % 60.0,
             s.peak_ping_ms,
-            kind,
+            tag,
             burst,
+            server_note,
         );
         for ev in &s.preceding_events {
             let players: Vec<&str> = ev.ships.iter().map(|sh| sh.player.as_str()).collect();

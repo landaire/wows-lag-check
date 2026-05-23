@@ -34,6 +34,7 @@ const copyChartBtnLabel = document.getElementById("copyChartBtnLabel");
 const thresholdSlider = document.getElementById("thresholdSlider");
 const thresholdLabel = document.getElementById("thresholdLabel");
 const thresholdReset = document.getElementById("thresholdReset");
+const legendClientOnly = document.getElementById("legendClientOnly");
 
 let wasmReady = init();
 let lastResult = null;
@@ -56,6 +57,52 @@ const KIND_ICON = {
   consumable: { icon: "ph-shield", color: "text-sky-400" },
   spotted:    { icon: "ph-eye",    color: "text-amber-400" },
 };
+
+// Visual + textual style for each stall classification. server-only and
+// client+server keep their original colours; client-only freeze is the new
+// category introduced by client-stream detection (rare in practice).
+const STALL_STYLE = {
+  "server-only": {
+    dot: "bg-orange-400",
+    fill: "rgba(251,146,60,0.32)",
+    stroke: "rgba(251,146,60,0.65)",
+  },
+  "client+server": {
+    dot: "bg-violet-400",
+    fill: "rgba(167,139,250,0.42)",
+    stroke: "rgba(167,139,250,0.85)",
+  },
+  "client-only freeze": {
+    dot: "bg-rose-500",
+    fill: "rgba(244,63,94,0.32)",
+    stroke: "rgba(244,63,94,0.65)",
+  },
+};
+
+function classifyStall(s) {
+  if (s.source === "client") return "client-only freeze";
+  if (s.client_present_during_gap) return "server-only";
+  return "client+server";
+}
+
+function spikesOverlap(a, b) {
+  return a.gap_start_clock <= b.gap_end_clock && b.gap_start_clock <= a.gap_end_clock;
+}
+
+// Server-stream spikes plus client-stream spikes that aren't covered by any
+// server-stream spike. Sorted by start clock so the table and chart can iterate
+// uniformly. In observed replays, pure-client entries don't occur (every game-
+// thread freeze also bunches server ticks); this keeps the UI quiet by default
+// but lights up if one ever does.
+function allRelevantSpikes(r) {
+  const server = r.spikes ?? [];
+  const pureClient = (r.client_spikes ?? []).filter(
+    (c) => !server.some((s) => spikesOverlap(c, s))
+  );
+  return [...server, ...pureClient].sort(
+    (a, b) => a.gap_start_clock - b.gap_start_clock
+  );
+}
 
 // Hover-link elements that share a data-eid (player name <-> table row).
 spikesCard.addEventListener("mouseover", (ev) => {
@@ -313,7 +360,8 @@ async function handleFile(file) {
     if (corruptClocks.length > 0) {
       corruptNote = ` Skipped ${corruptClocks.length} corrupt packet${corruptClocks.length === 1 ? "" : "s"}.`;
     }
-    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} samples, ${result.server_ticks_total} ticks, ${result.spikes.length} spikes.${dataNote}${corruptNote}`);
+    const spikeTotal = allRelevantSpikes(result).length;
+    setStatus("ok", `Parsed in ${ms} ms. ${result.samples_total} samples, ${result.server_ticks_total} ticks, ${spikeTotal} spikes.${dataNote}${corruptNote}`);
     lastResult = result;
     renderResult(result);
   } catch (err) {
@@ -475,12 +523,18 @@ function renderResult(r) {
   severityHeadline.textContent = sev.headline;
 
   battleTimeHeader.textContent = r.battle_start_clock_exact ? "Battle time" : "Battle time (approx)";
+  const spikesAll = allRelevantSpikes(r);
   render(spikeRowsTemplate(r), spikeRows);
-  spikesNote.textContent = r.spikes.length
-    ? `${r.spikes.length} gap${r.spikes.length === 1 ? "" : "s"} >= ${r.spike_threshold_ms} ms`
+  spikesNote.textContent = spikesAll.length
+    ? `${spikesAll.length} gap${spikesAll.length === 1 ? "" : "s"} >= ${r.spike_threshold_ms} ms`
     : "";
 
-  const allShips = involvedShips(r.spikes.flatMap((s) => s.preceding_events ?? []));
+  const hasClientOnly = spikesAll.some((s) => s.source === "client");
+  // Use inline style so Tailwind's `hidden` doesn't fight `inline-flex` on the
+  // element (both are display utilities; the later-defined one would win).
+  legendClientOnly.style.display = hasClientOnly ? "" : "none";
+
+  const allShips = involvedShips(spikesAll.flatMap((s) => s.preceding_events ?? []));
   spikeShips.classList.toggle("hidden", allShips.length === 0);
   render(
     allShips.length
@@ -519,15 +573,16 @@ function renderResult(r) {
 }
 
 function spikeRowsTemplate(r) {
-  if (r.spikes.length === 0) {
+  const spikes = allRelevantSpikes(r);
+  if (spikes.length === 0) {
     return html`<tr><td colspan="7" class="py-3 text-slate-500">No gaps over ${r.spike_threshold_ms} ms detected.</td></tr>`;
   }
-  return r.spikes.map((s) => spikeRow(s, r));
+  return spikes.map((s) => spikeRow(s, r));
 }
 
 function spikeRow(s, r) {
-  const stallColor = s.client_present_during_gap ? "bg-orange-400" : "bg-violet-400";
-  const stallLabel = s.client_present_during_gap ? "server-only" : "client+server";
+  const stallLabel = classifyStall(s);
+  const stallColor = STALL_STYLE[stallLabel].dot;
   const gapClass = s.gap_seconds > 2 ? "text-rose-300 font-semibold" : "text-slate-200";
   const sinceLast = fmtSinceLast(s.seconds_since_previous_spike);
   const mainRow = html`
@@ -659,15 +714,16 @@ ${serverLine}
 ${arenaLine}
 `;
 
-  if (r.spikes.length > 0) {
+  const spikesAll = allRelevantSpikes(r);
+  if (spikesAll.length > 0) {
     body += `\n**Spikes** (gaps >= ${r.spike_threshold_ms} ms):\n\`\`\`\n`;
     body += `battle  gap     peak   type\n`;
-    body += `------  ------  -----  --------------\n`;
-    for (const s of r.spikes) {
+    body += `------  ------  -----  ------------------\n`;
+    for (const s of spikesAll) {
       const bt = fmtClockShort(Math.max(0, s.gap_start_clock - r.battle_start_clock_s));
       const gap = `${(s.gap_seconds * 1000).toFixed(0)}ms`.padStart(6);
       const peak = `${s.peak_ping_ms}ms`.padStart(5);
-      const type = s.client_present_during_gap ? "server-only" : "client+server";
+      const type = classifyStall(s);
       body += `${bt.padEnd(6)}  ${gap}  ${peak}  ${type}\n`;
       if (s.burst_ticks > 1) {
         body += `        burst: ${s.burst_ticks} server ticks stamped one clock\n`;
@@ -679,7 +735,7 @@ ${arenaLine}
     }
     body += `\`\`\`\n`;
 
-    const ships = involvedShips(r.spikes.flatMap((s) => s.preceding_events ?? []));
+    const ships = involvedShips(spikesAll.flatMap((s) => s.preceding_events ?? []));
     if (ships.length > 0) {
       body += `\n**Ships**\n${shipTableText(ships)}`;
     }
@@ -744,13 +800,13 @@ function renderChart(r) {
     <text x=${x(t)} y=${pad.t + innerH + 16} text-anchor="middle" fill="#64748b" font-size="11" font-family="ui-monospace, monospace">${fmtClock(t).slice(0, 5)}</text>
   `);
 
-  const spikeBands = r.spikes.map((s) => {
+  const spikesAll = allRelevantSpikes(r);
+  const spikeBands = spikesAll.map((s) => {
     const xs = x(s.gap_start_clock);
     const xe = x(s.gap_end_clock);
     const w = Math.max(2, xe - xs);
-    const fill = s.client_present_during_gap ? "rgba(251,146,60,0.32)" : "rgba(167,139,250,0.42)";
-    const stroke = s.client_present_during_gap ? "rgba(251,146,60,0.65)" : "rgba(167,139,250,0.85)";
-    return svg`<rect x=${xs} y=${pad.t} width=${w} height=${innerH} fill=${fill} stroke=${stroke} stroke-width="1"/>`;
+    const style = STALL_STYLE[classifyStall(s)];
+    return svg`<rect x=${xs} y=${pad.t} width=${w} height=${innerH} fill=${style.fill} stroke=${style.stroke} stroke-width="1"/>`;
   });
 
   // Quiet-interval annotation between adjacent spike bands.
@@ -759,8 +815,8 @@ function renderChart(r) {
   const LABEL_HALF_PX = 40;
   const MIN_LABEL_PX = 110;
   const TICK_HALF = 5;
-  const sinceAnnotations = r.spikes.slice(1).flatMap((s, i) => {
-    const prev = r.spikes[i];
+  const sinceAnnotations = spikesAll.slice(1).flatMap((s, i) => {
+    const prev = spikesAll[i];
     const idle = s.gap_start_clock - prev.gap_end_clock;
     if (!(idle > 0)) return [];
     const x1 = x(prev.gap_end_clock);

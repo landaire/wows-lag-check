@@ -27,9 +27,11 @@ enum PacketKind {
     PlayerNetStats,
     /// 72-byte tick with monotonic counter at offset 12, 10Hz.
     ServerTick,
-    /// Client-driven packets (camera, gun marker, gun rotation) that fire on a
-    /// local timer regardless of server state. Used to distinguish a
-    /// server-only stall from a full client freeze.
+    /// 60-byte camera packet, fires every 10Hz tick. Sampled into the
+    /// `client_ticks` stream for client-stall detection.
+    Camera,
+    /// Other client-driven packets (gun marker, gun rotation) that fire on the
+    /// same 10Hz local timer.
     ClientSide,
     Other,
 }
@@ -39,16 +41,17 @@ impl PacketKind {
         match raw {
             0x1f => Self::PlayerNetStats,
             0x39 => Self::ServerTick,
-            // 0x1a (60B camera), 0x26 (40B gun marker), and 0x1c/0x1d (gun
-            // yaw/pitch floats) all co-fire on the 10Hz client timer with
-            // PlayerNetStats and stop together when the client freezes.
-            0x1a | 0x1c | 0x1d | 0x26 => Self::ClientSide,
+            // 0x1a (60B camera) is sampled directly; 0x26 (40B gun marker) and
+            // 0x1c/0x1d (gun yaw/pitch floats) co-fire on the same 10Hz timer
+            // and contribute to the client-side packet header flag.
+            0x1a => Self::Camera,
+            0x1c | 0x1d | 0x26 => Self::ClientSide,
             _ => Self::Other,
         }
     }
 
     fn is_client_side(self) -> bool {
-        matches!(self, Self::PlayerNetStats | Self::ClientSide)
+        matches!(self, Self::PlayerNetStats | Self::Camera | Self::ClientSide)
     }
 }
 
@@ -213,6 +216,10 @@ impl PlaintextFeedbackCipher {
 struct WotDecoder {
     samples: Vec<analysis::NetStat>,
     tick_clocks: Vec<f32>,
+    /// Clocks of the 60-byte WoT camera packet (0x1a). Co-fires with
+    /// PlayerNetStats and the other client-driven packets on the 10Hz local
+    /// timer, so a gap here indicates a client-side freeze.
+    client_ticks: Vec<f32>,
     headers: Vec<analysis::PacketHeader>,
     corrupt_packet_clocks: Vec<f32>,
 }
@@ -245,6 +252,7 @@ impl WotDecoder {
                     }
                 }
                 PacketKind::ServerTick => self.tick_clocks.push(clock),
+                PacketKind::Camera => self.client_ticks.push(clock),
                 PacketKind::ClientSide | PacketKind::Other => {}
             }
         }
@@ -256,6 +264,7 @@ impl WotDecoder {
             meta_out(meta),
             self.samples,
             self.tick_clocks,
+            self.client_ticks,
             self.headers,
             Vec::new(),
             false,

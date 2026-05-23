@@ -16,8 +16,23 @@ pub struct PingSample {
     pub is_lagging: bool,
 }
 
+/// Which packet stream the gap was detected in.
+///
+/// `Server` spikes come from gaps in the 7Hz ServerTick stream and historically
+/// catch network/server lag. `Client` spikes come from gaps in the 10Hz
+/// Camera/GunMarker/PlayerNetStats stream and catch game-thread freezes: when
+/// the client stalls, incoming server packets get buffered and written with the
+/// pre-freeze clock, but outgoing client-side packets simply pause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpikeSource {
+    Server,
+    Client,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Spike {
+    pub source: SpikeSource,
     pub gap_start_clock: f32,
     pub gap_end_clock: f32,
     pub gap_seconds: f32,
@@ -26,6 +41,16 @@ pub struct Spike {
     pub client_packets_in_gap: u32,
     pub client_rate_hz: f32,
     pub client_present_during_gap: bool,
+    /// Total ServerTick records observed in the gap window. During a client
+    /// freeze, many ticks get recorded at the same pre-freeze clock value, so
+    /// this can be high even when [`server_distinct_clocks_in_gap`] is zero.
+    pub server_packets_in_gap: u32,
+    /// Count of distinct clock values among server ticks inside the gap. Near
+    /// the normal 7Hz means the server was actually running during the gap;
+    /// zero means everything stalled together (or got buffered).
+    pub server_distinct_clocks_in_gap: u32,
+    pub server_rate_hz: f32,
+    pub server_present_during_gap: bool,
     /// >1 means the server fired repeated ticks at the same clock before freezing.
     pub burst_ticks: u32,
     pub seconds_since_previous_spike: Option<f32>,
@@ -117,10 +142,19 @@ pub struct AnalysisResult {
     pub battle_start_clock_exact: bool,
     pub samples: Vec<PingSample>,
     pub server_tick_clocks: Vec<f32>,
+    /// Clocks of the lockstep 10Hz client-side packet stream (one entry per
+    /// observed Camera packet). A gap here indicates the game thread froze.
+    pub client_tick_clocks: Vec<f32>,
+    /// Server-tick gaps, preserved for compatibility. See [`Spike::source`].
     pub spikes: Vec<Spike>,
+    /// Client-tick gaps. Often overlap with server spikes during a freeze
+    /// (same event seen from two angles), but provide finer temporal
+    /// resolution and a cleaner signature for client-side stalls.
+    pub client_spikes: Vec<Spike>,
     pub ping_stats: PingStats,
     pub samples_total: u32,
     pub server_ticks_total: u32,
+    pub client_ticks_total: u32,
     pub replay_duration_s: f32,
     pub spike_threshold_ms: u32,
     pub severity: SeveritySummary,
@@ -151,6 +185,7 @@ pub fn build_analysis(
     meta: ReplayMetaOut,
     samples: Vec<NetStat>,
     server_ticks: Vec<f32>,
+    client_ticks: Vec<f32>,
     headers: Vec<PacketHeader>,
     mut events: Vec<GameEvent>,
     entity_defs_loaded: bool,
@@ -175,17 +210,79 @@ pub fn build_analysis(
             .partial_cmp(&b.clock)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut spikes = detect_spikes(&server_ticks, &samples, &headers, thresholds);
+
+    let mut spikes = detect_spikes(
+        SpikeSource::Server,
+        &server_ticks,
+        &server_ticks,
+        &samples,
+        &headers,
+        thresholds,
+    );
+    let mut client_spikes = detect_spikes(
+        SpikeSource::Client,
+        &client_ticks,
+        &server_ticks,
+        &samples,
+        &headers,
+        thresholds,
+    );
+
+    let replay_duration_s = headers.iter().map(|h| h.clock).fold(0.0_f32, f32::max);
+    let battle_start_clock_exact = battle_start_clock.is_some();
+    let battle_start_clock_s = battle_start_clock.unwrap_or(30.94_f32);
+
+    // Drop pure client-stream gaps that finish before the player is in
+    // battle. The 10Hz Camera cadence doesn't begin until the user has
+    // clicked through the loading screen, so anything earlier registers as a
+    // "client freeze" that's actually just init. Server-stream gaps from the
+    // same window are kept — they represent both-streams-silent events that
+    // the existing analyzer has always reported.
+    client_spikes.retain(|s| s.gap_end_clock >= battle_start_clock_s);
+
+    annotate_spike_chain(&mut spikes);
+    annotate_spike_chain(&mut client_spikes);
+
+    let mut distinct_ticks = server_ticks.clone();
+    distinct_ticks.dedup();
+    annotate_preceding_events(&mut spikes, &events, &distinct_ticks);
+    annotate_preceding_events(&mut client_spikes, &events, &distinct_ticks);
+
+    let severity = classify_severity(&spikes, &client_spikes, battle_start_clock_s);
+
+    AnalysisResult {
+        meta,
+        battle_start_clock_s,
+        battle_start_clock_exact,
+        samples: samples_out,
+        server_tick_clocks: server_ticks.clone(),
+        client_tick_clocks: client_ticks.clone(),
+        spikes,
+        client_spikes,
+        ping_stats,
+        samples_total: samples.len() as u32,
+        server_ticks_total: server_ticks.len() as u32,
+        client_ticks_total: client_ticks.len() as u32,
+        replay_duration_s,
+        spike_threshold_ms: (thresholds.min_gap_s * 1000.0).round() as u32,
+        severity,
+        entity_defs_loaded,
+        game_params_loaded,
+        corrupt_packet_clocks,
+    }
+}
+
+fn annotate_spike_chain(spikes: &mut [Spike]) {
     let mut prev_end: Option<f32> = None;
-    for spike in &mut spikes {
+    for spike in spikes.iter_mut() {
         spike.seconds_since_previous_spike =
             prev_end.map(|end| (spike.gap_start_clock - end).max(0.0));
         prev_end = Some(spike.gap_end_clock);
     }
-    let mut distinct_ticks = server_ticks.clone();
-    distinct_ticks.dedup();
+}
 
-    for spike in &mut spikes {
+fn annotate_preceding_events(spikes: &mut [Spike], events: &[GameEvent], distinct_ticks: &[f32]) {
+    for spike in spikes.iter_mut() {
         let lo = spike.gap_start_clock - EVENT_WINDOW_S;
         let hi = spike.gap_start_clock;
         let gap_ticks = distinct_ticks.partition_point(|&t| t <= spike.gap_start_clock) as i32;
@@ -200,43 +297,24 @@ pub fn build_analysis(
             })
             .collect();
     }
-
-    let replay_duration_s = headers.iter().map(|h| h.clock).fold(0.0_f32, f32::max);
-    let battle_start_clock_exact = battle_start_clock.is_some();
-    let battle_start_clock_s = battle_start_clock.unwrap_or(30.94_f32);
-    let severity = classify_severity(&spikes, battle_start_clock_s);
-
-    AnalysisResult {
-        meta,
-        battle_start_clock_s,
-        battle_start_clock_exact,
-        samples: samples_out,
-        server_tick_clocks: server_ticks.clone(),
-        spikes,
-        ping_stats,
-        samples_total: samples.len() as u32,
-        server_ticks_total: server_ticks.len() as u32,
-        replay_duration_s,
-        spike_threshold_ms: (thresholds.min_gap_s * 1000.0).round() as u32,
-        severity,
-        entity_defs_loaded,
-        game_params_loaded,
-        corrupt_packet_clocks,
-    }
 }
 
-fn classify_severity(spikes: &[Spike], battle_start: f32) -> SeveritySummary {
-    let spike_count = spikes.len() as u32;
-    let total_stalled_s: f32 = spikes.iter().map(|s| s.gap_seconds).sum();
-    let worst = spikes.iter().max_by(|a, b| {
-        a.gap_seconds
-            .partial_cmp(&b.gap_seconds)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let worst_gap_s = worst.map(|s| s.gap_seconds).unwrap_or(0.0);
-    let worst_gap_battle_s = worst
-        .map(|s| s.gap_start_clock - battle_start)
-        .unwrap_or(0.0);
+/// Severity considers both server-stream and client-stream spikes. The two
+/// streams usually report the same freezes (server-tick burst at frozen clock,
+/// client-tick clean gap), so deduping by overlap avoids double-counting.
+fn classify_severity(
+    server_spikes: &[Spike],
+    client_spikes: &[Spike],
+    battle_start: f32,
+) -> SeveritySummary {
+    let merged = merge_overlapping_spikes(server_spikes, client_spikes);
+    let spike_count = merged.len() as u32;
+    let total_stalled_s: f32 = merged.iter().map(|s| s.2).sum();
+    let worst = merged
+        .iter()
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    let worst_gap_s = worst.map(|s| s.2).unwrap_or(0.0);
+    let worst_gap_battle_s = worst.map(|s| s.0 - battle_start).unwrap_or(0.0);
 
     let severity = if spike_count == 0 {
         Severity::Clean
@@ -249,9 +327,9 @@ fn classify_severity(spikes: &[Spike], battle_start: f32) -> SeveritySummary {
     };
 
     let headline = match severity {
-        Severity::Clean => "No server stalls detected.".to_string(),
+        Severity::Clean => "No stalls detected.".to_string(),
         _ => format!(
-            "{} spike{}, {:.1}s total stalled, worst {:.1}s",
+            "{} stall{}, {:.1}s total stalled, worst {:.1}s",
             spike_count,
             if spike_count == 1 { "" } else { "s" },
             total_stalled_s,
@@ -267,6 +345,31 @@ fn classify_severity(spikes: &[Spike], battle_start: f32) -> SeveritySummary {
         worst_gap_battle_s,
         headline,
     }
+}
+
+/// Walks the union of server- and client-stream spikes in clock order and
+/// collapses overlapping windows into a single (start, end, length) tuple. The
+/// gap_seconds field of the synthesized spike covers the merged extent rather
+/// than the sum of contributors.
+fn merge_overlapping_spikes(server: &[Spike], client: &[Spike]) -> Vec<(f32, f32, f32)> {
+    let mut windows: Vec<(f32, f32)> = server
+        .iter()
+        .chain(client.iter())
+        .map(|s| (s.gap_start_clock, s.gap_end_clock))
+        .collect();
+    windows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out: Vec<(f32, f32, f32)> = Vec::new();
+    for (start, end) in windows {
+        if let Some(last) = out.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+            last.2 = last.1 - last.0;
+            continue;
+        }
+        out.push((start, end, end - start));
+    }
+    out
 }
 
 fn compute_ping_stats(samples: &[NetStat]) -> PingStats {
@@ -295,13 +398,15 @@ fn compute_ping_stats(samples: &[NetStat]) -> PingStats {
 }
 
 fn detect_spikes(
+    source: SpikeSource,
+    primary_ticks: &[f32],
     server_ticks: &[f32],
     samples: &[NetStat],
     headers: &[PacketHeader],
     thresholds: SpikeThresholds,
 ) -> Vec<Spike> {
     let mut spikes = Vec::new();
-    for (idx, window) in server_ticks.windows(2).enumerate() {
+    for (idx, window) in primary_ticks.windows(2).enumerate() {
         let prev = window[0];
         let cur = window[1];
         let gap = cur - prev;
@@ -309,7 +414,11 @@ fn detect_spikes(
             continue;
         }
 
-        let burst_ticks = server_ticks[..=idx]
+        // For server-stream gaps, burst_ticks is the classic "server fired N
+        // repeated ticks at the same clock before freezing" signal. For
+        // client-stream gaps it tends to be 1, since client-side packets pause
+        // cleanly rather than bunching.
+        let burst_ticks = primary_ticks[..=idx]
             .iter()
             .rev()
             .take_while(|&&t| t == prev)
@@ -319,6 +428,19 @@ fn detect_spikes(
             .iter()
             .filter(|h| h.clock > prev && h.clock < cur && h.is_client_side)
             .count() as u32;
+
+        let server_total_in_gap = server_ticks
+            .iter()
+            .filter(|&&t| t > prev && t < cur)
+            .count() as u32;
+        let mut server_in_gap_clocks: Vec<f32> = server_ticks
+            .iter()
+            .copied()
+            .filter(|&t| t > prev && t < cur)
+            .collect();
+        server_in_gap_clocks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        server_in_gap_clocks.dedup();
+        let server_distinct_in_gap = server_in_gap_clocks.len() as u32;
 
         let (peak_ping_ms, peak_ping_clock) = samples
             .iter()
@@ -334,7 +456,17 @@ fn detect_spikes(
         };
         let client_present_during_gap = client_rate_hz > 5.0;
 
+        let server_rate_hz = if gap > 0.0 {
+            server_distinct_in_gap as f32 / gap
+        } else {
+            0.0
+        };
+        // Normal server tick cadence is 7Hz; >3Hz means the server was
+        // actually running (not just buffering) during the gap.
+        let server_present_during_gap = server_rate_hz > 3.0;
+
         spikes.push(Spike {
+            source,
             gap_start_clock: prev,
             gap_end_clock: cur,
             gap_seconds: gap,
@@ -343,6 +475,10 @@ fn detect_spikes(
             client_packets_in_gap,
             client_rate_hz,
             client_present_during_gap,
+            server_packets_in_gap: server_total_in_gap,
+            server_distinct_clocks_in_gap: server_distinct_in_gap,
+            server_rate_hz,
+            server_present_during_gap,
             burst_ticks,
             seconds_since_previous_spike: None,
             preceding_events: Vec::new(),
