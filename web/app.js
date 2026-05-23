@@ -306,9 +306,8 @@ async function handleFile(file) {
     const result = analyzeReplay(bytes, defsBundle, gameParams, translations, thresholdMs);
     const ms = (performance.now() - t0).toFixed(0);
     let dataNote = "";
-    if (isWot) dataNote = " (WoT: basic mode)";
-    else if (!result.entity_defs_loaded) dataNote = " (no entity defs)";
-    else if (!result.game_params_loaded) dataNote = " (no ship names)";
+    if (!isWot && !result.entity_defs_loaded) dataNote = " (no entity defs)";
+    else if (!isWot && !result.game_params_loaded) dataNote = " (no ship names)";
     const corruptClocks = result.corrupt_packet_clocks ?? [];
     let corruptNote = "";
     if (corruptClocks.length > 0) {
