@@ -401,9 +401,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.8.1"
+version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
+checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "miniz_oxide"
@@ -498,9 +498,9 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pickled"
-version = "2.0.0-alpha8"
+version = "2.0.0-alpha9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d17d516b19eb47dccba3ec79505508953ba21524f5621660fc4d898936f2b58e"
+checksum = "7e5ffbea63b79a77a3a358a52f7ee90445120aa09ebc4716f7198b0630c12f35"
 dependencies = [
  "byteorder",
  "iter-read",
@@ -557,9 +557,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
@@ -759,9 +759,9 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "syn"
-version = "2.0.117"
+version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -975,9 +975,9 @@ dependencies = [
 
 [[package]]
 name = "wows-core"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a30ce8530978f2f7d602b0acf006922277d0c042754f78606a07363d71563ba"
+checksum = "ece6c95350606af79bc99dbcea13ae84edb0b6b4e9342c428c11d238c8f9473e"
 dependencies = [
  "rkyv",
  "roxmltree",
@@ -1006,9 +1006,9 @@ dependencies = [
 
 [[package]]
 name = "wows_replays"
-version = "0.39.0"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd982c8f0bf43b640ea8b546a2eb5d8d174b69df686e161d37e94e69ed9525ea"
+checksum = "adb695aa8360997c5b2a501b6163d8db5cc8018e62d5fe1c64734b2f7cc6c732"
 dependencies = [
  "blowfish",
  "bon",
@@ -1030,9 +1030,9 @@ dependencies = [
 
 [[package]]
 name = "wowsunpack"
-version = "0.38.0"
+version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b2a926f2613be3ead64078e3f72decbb0b5c15a6e3bab4a866b0ae38c6ec554"
+checksum = "8f762043c333d1e17e3e87378b5b900be5e1d4b7bd66ad1b6e3b58853012a17d"
 dependencies = [
  "bon",
  "convert_case",
