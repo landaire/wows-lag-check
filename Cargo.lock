@@ -986,9 +986,9 @@ dependencies = [
 
 [[package]]
 name = "wows-core"
-version = "0.8.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1a29ec11b67ba950a6c0a3d333f3b4f59ab4f8f78972cd1e57fdabcc1e8b846"
+checksum = "0a55684b388d37ad44a86f8ff0cf7be886ece6ecbb8a1a4dd85633eee7a6269c"
 dependencies = [
  "rkyv",
  "roxmltree",
@@ -1017,14 +1017,11 @@ dependencies = [
 
 [[package]]
 name = "wows_replays"
-version = "0.41.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f98c9e2aff5b3eed06321f339c2ff818e726c3ab3537bdf35a53d425f4f1e07b"
+checksum = "0bf45f234af9d6a2cf71df90443fb06cdaa1baa3284d3e0c5673c01c08495505"
 dependencies = [
- "blowfish",
  "bon",
- "byteorder",
- "cipher",
  "flate2",
  "kinded",
  "modular-bitfield",
@@ -1041,9 +1038,9 @@ dependencies = [
 
 [[package]]
 name = "wowsunpack"
-version = "0.40.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e488944cdc580210bc5e4168970e58b985b49b6c7c2ee04e4027949eb0ed99c9"
+checksum = "696ad63e2ddf0311ebba65c308af0b91783f1ae88ed397c6774f4b3ebc8d3792"
 dependencies = [
  "bon",
  "convert_case",
@@ -1055,6 +1052,7 @@ dependencies = [
  "rkyv",
  "rootcause",
  "roxmltree",
+ "rustc-hash",
  "serde",
  "serde_json",
  "thiserror",
