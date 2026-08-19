@@ -125,7 +125,7 @@ impl<'a> WowsDecoder<'a> {
 
     fn decode_spec_free(&mut self) -> Result<(), String> {
         let mut last_valid_clock: f32 = 0.0;
-        for packet in RawPacketIterator::new(&self.replay.packet_data) {
+        for packet in RawPacketIterator::new(self.replay.packet_data()) {
             let packet = packet.map_err(|e| format!("packet parse: {e:?}"))?;
             let clock = packet.clock.seconds();
             if !(0.0..MAX_REPLAY_CLOCK_S).contains(&clock) {
@@ -148,7 +148,7 @@ impl<'a> WowsDecoder<'a> {
                 _ => {}
             }
         }
-        self.realm = replay::detect_realm(&self.replay.packet_data).map(str::to_string);
+        self.realm = replay::detect_realm(self.replay.packet_data()).map(str::to_string);
         Ok(())
     }
 
@@ -163,7 +163,7 @@ impl<'a> WowsDecoder<'a> {
             .build();
 
         let mut parser = Parser::new(specs);
-        let mut remaining = &self.replay.packet_data[..];
+        let mut remaining = self.replay.packet_data();
         let mut last_valid_clock: f32 = 0.0;
         while !remaining.is_empty() {
             let packet = parser

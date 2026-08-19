@@ -37,7 +37,7 @@ fn analyze(path: &str) -> Result<(), String> {
     let replay = ReplayFile::from_bytes(&bytes).map_err(|e| format!("parse: {e:?}"))?;
     let mut clocks: Vec<Vec<f32>> = vec![Vec::new(); TRACKED.len()];
 
-    for packet in RawPacketIterator::new(&replay.packet_data) {
+    for packet in RawPacketIterator::new(replay.packet_data()) {
         let packet = packet.map_err(|e| format!("packet: {e:?}"))?;
         let clock = packet.clock.seconds();
         if !(0.0..MAX_REPLAY_CLOCK_S).contains(&clock) {
